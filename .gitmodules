@@ -1,0 +1,21 @@
+[submodule "Gateway"]
+	path = Gateway
+	url = https://github.com/discordia-g12/Gateway.git
+[submodule "Auth-User-Service"]
+	path = Auth-User-Service
+	url = https://github.com/discordia-g12/Auth-User-Service.git
+[submodule "Chat-Engine-Service"]
+	path = Chat-Engine-Service
+	url = https://github.com/discordia-g12/Chat-Engine-Service.git
+[submodule "Notification-Audit-Metrics-Service"]
+	path = Notification-Audit-Metrics-Service
+	url = https://github.com/discordia-g12/Notification-Audit-Metrics-Service.git
+[submodule "Payments-Monetization-Service"]
+	path = Payments-Monetization-Service
+	url = https://github.com/discordia-g12/Payments-Monetization-Service.git
+[submodule "Server-Roles-Core-Service"]
+	path = Server-Roles-Core-Service
+	url = https://github.com/discordia-g12/Server-Roles-Core-Service.git
+[submodule "Voice-Signaling-Session-Service"]
+	path = Voice-Signaling-Session-Service
+	url = https://github.com/discordia-g12/Voice-Signaling-Session-Service.git
