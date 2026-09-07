@@ -19,3 +19,6 @@
 [submodule "Voice-Signaling-Session-Service"]
 	path = Voice-Signaling-Session-Service
 	url = https://github.com/discordia-g12/Voice-Signaling-Session-Service.git
+[submodule ".github"]
+	path = .github
+	url = https://github.com/discordia-g12/.github.git
