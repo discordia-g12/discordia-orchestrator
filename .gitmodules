@@ -22,3 +22,6 @@
 [submodule ".github"]
 	path = .github
 	url = https://github.com/discordia-g12/.github.git
+[submodule "Discordia-WebApp"]
+	path = Discordia-WebApp
+	url = https://github.com/discordia-g12/Discordia-WebApp.git

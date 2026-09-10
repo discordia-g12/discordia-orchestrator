@@ -1,0 +1,16 @@
+# Operating System
+.DS_Store
+Thumbs.db
+
+# Docker Local Development Overrides
+docker-compose.override.yml
+
+# Environment & Local Secrets
+.env
+.env.local
+
+# Temporary files & Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
