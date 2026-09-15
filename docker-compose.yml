@@ -9,9 +9,12 @@ services:
     container_name: discordia-auth-service
     restart: unless-stopped
     ports:
-      - "8001:8000"
+      - "8004:8000"
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@auth-db:5432/auth_db
+      - DATABASE_HOST=auth-db
+      - DATABASE_USER=postgres
+      - DATABASE_PASSWORD=postgres
+      - DATABASE_NAME=auth_db
     depends_on:
       auth-db:
         condition: service_healthy
@@ -301,6 +304,7 @@ services:
 # ==========================================
 networks:
   discordia-net:
+    name: discordia-net
     driver: bridge
 
 volumes:
