@@ -111,11 +111,14 @@ services:
       - ENVIRONMENT=development
       - HOST=0.0.0.0
       - PORT=8080
+      - PYTHONPATH=/app
       - DATABASE_HOST=server-roles-db
       - DATABASE_NAME=db
       - DATABASE_PORT=5432
       - DATABASE_USER=admin
       - DATABASE_PASSWORD=password
+    volumes:
+      - ./Server-Roles-Core-Service:/app
     depends_on:
       server-roles-db:
         condition: service_healthy
