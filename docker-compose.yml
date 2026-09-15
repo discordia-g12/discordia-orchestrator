@@ -1,5 +1,60 @@
 services:
   # ==========================================
+  # 0. API GATEWAY (Kong DB-less + Redis)
+  # ==========================================
+  gateway:
+    build:
+      context: ./Gateway
+      dockerfile: Dockerfile
+    container_name: discordia-gateway
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+    environment:
+      - KONG_DATABASE=off
+      - KONG_DECLARATIVE_CONFIG=/usr/local/kong/declarative/kong.yml
+      - KONG_ADMIN_LISTEN=0.0.0.0:8001
+      - KONG_LUA_PACKAGE_PATH=/usr/local/share/lua/5.1/?.lua;;
+      - KONG_NGINX_HTTP_INCLUDE=/etc/kong/shared-dicts.conf
+      - KONG_NGINX_MAIN_INCLUDE=/etc/kong/main-env.conf
+      - KONG_UNTRUSTED_LUA_SANDBOX_REQUIRES=gateway_health,auth0_validator,resty.openidc
+      - KONG_LUA_SSL_TRUSTED_CERTIFICATE=/etc/ssl/certs/ca-certificates.crt
+      - KONG_LUA_SSL_VERIFY_DEPTH=5
+    env_file:
+      - ./Gateway/.env
+    volumes:
+      - ./Gateway/kong.yml:/usr/local/kong/declarative/kong.yml:ro
+      - ./Gateway/auth0_validator.lua:/usr/local/share/lua/5.1/auth0_validator.lua:ro
+      - ./Gateway/gateway_health.lua:/usr/local/share/lua/5.1/gateway_health.lua:ro
+      - ./Gateway/nginx/shared-dicts.conf:/etc/kong/shared-dicts.conf:ro
+      - ./Gateway/nginx/main-env.conf:/etc/kong/main-env.conf:ro
+    depends_on:
+      gateway-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    networks:
+      - discordia-net
+
+  gateway-redis:
+    image: redis:7-alpine
+    container_name: discordia-gateway-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      discordia-net:
+        aliases:
+          - redis
+
+  # ==========================================
   # 1. AUTH & USER SERVICE (Python / FastAPI)
   # ==========================================
   auth-service:
