@@ -345,12 +345,12 @@ services:
       context: ./Discordia-WebApp
       dockerfile: Dockerfile
       args:
-        - VITE_API_URL=http://localhost:8000
-        - VITE_WS_URL=http://localhost:8000
-        - VITE_AUTH0_DOMAIN=dev-dppme5iaqg60gkmo.us.auth0.com
-        - VITE_AUTH0_CLIENT_ID=f2H8PhlKDl3KSIm64G5mHAeQih7iFyIP
-        - VITE_AUTH0_AUDIENCE=https://api.discordia.com
-        - VITE_USE_MOCK=false
+        - VITE_API_URL=${VITE_API_URL:-http://localhost:8000}
+        - VITE_WS_URL=${VITE_WS_URL:-http://localhost:8000}
+        - VITE_AUTH0_DOMAIN=${VITE_AUTH0_DOMAIN:-dev-dppme5iaqg60gkmo.us.auth0.com}
+        - VITE_AUTH0_CLIENT_ID=${VITE_AUTH0_CLIENT_ID:-f2H8PhlKDl3KSIm64G5mHAeQih7iFyIP}
+        - VITE_AUTH0_AUDIENCE=${VITE_AUTH0_AUDIENCE:-https://api.discordia.com}
+        - VITE_USE_MOCK=${VITE_USE_MOCK:-false}
     container_name: discordia-webapp
     restart: unless-stopped
     ports:
