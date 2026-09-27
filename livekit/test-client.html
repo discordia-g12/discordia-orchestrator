@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LiveKit Test</title>
+<!-- Cliente mínimo para probar el servidor LiveKit local. Ver livekit/README.md -->
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 24px auto; padding: 0 16px; }
+  label { display: block; margin-top: 12px; font-weight: 600; }
+  input, textarea { width: 100%; box-sizing: border-box; padding: 6px; font-family: monospace; }
+  textarea { height: 90px; }
+  button { margin-top: 12px; padding: 8px 14px; }
+  #status { margin-top: 16px; font-weight: 600; }
+  #log { margin-top: 12px; background: #111; color: #0f0; padding: 8px; height: 220px; overflow: auto; font-size: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>LiveKit Test</h1>
+<label>Server URL <input id="url" value="ws://localhost:7880"></label>
+<label>Token <textarea id="token" placeholder="eyJ..."></textarea></label>
+<button id="connect">Conectar + micrófono</button>
+<button id="leave" disabled>Salir</button>
+<div id="status">Desconectado</div>
+<div>Participantes: <span id="people">-</span></div>
+<div id="log"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.js"></script>
+<script>
+  const { Room, RoomEvent, Track } = LivekitClient;
+  const $ = (id) => document.getElementById(id);
+  const log = (msg) => { $('log').textContent += new Date().toLocaleTimeString() + '  ' + msg + '\n'; $('log').scrollTop = 1e9; };
+  let room;
+
+  function refreshPeople() {
+    if (!room) return;
+    const names = [room.localParticipant.identity + ' (vos)', ...[...room.remoteParticipants.values()].map(p => p.identity)];
+    $('people').textContent = names.join(', ');
+  }
+
+  $('connect').onclick = async () => {
+    room = new Room();
+    room
+      .on(RoomEvent.ConnectionStateChanged, (s) => { $('status').textContent = 'Estado: ' + s; log('estado: ' + s); })
+      .on(RoomEvent.ParticipantConnected, (p) => { log('entró ' + p.identity); refreshPeople(); })
+      .on(RoomEvent.ParticipantDisconnected, (p) => { log('salió ' + p.identity); refreshPeople(); })
+      .on(RoomEvent.TrackSubscribed, (track, _pub, p) => {
+        if (track.kind === Track.Kind.Audio) {
+          document.body.appendChild(track.attach());
+          log('recibiendo audio de ' + p.identity);
+        }
+      })
+      .on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+        if (speakers.length) log('hablando: ' + speakers.map(s => s.identity).join(', '));
+      })
+      .on(RoomEvent.Disconnected, (reason) => { log('desconectado: ' + reason); $('leave').disabled = true; });
+
+    try {
+      log('conectando a ' + $('url').value + ' ...');
+      await room.connect($('url').value.trim(), $('token').value.trim());
+      await room.localParticipant.setMicrophoneEnabled(true);
+      await room.startAudio();
+      log('micrófono publicado');
+      $('leave').disabled = false;
+      refreshPeople();
+    } catch (err) {
+      log('ERROR: ' + err.message);
+      console.error(err);
+    }
+  };
+
+  $('leave').onclick = () => room && room.disconnect();
+</script>
+</body>
+</html>

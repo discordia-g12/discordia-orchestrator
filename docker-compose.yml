@@ -279,12 +279,42 @@ services:
       - PORT=8080
       - REDIS_HOST=voice-redis
       - REDIS_PORT=6379
-      - LIVEKIT_API_KEY=tu_api_key
-      - LIVEKIT_API_SECRET=tu_api_secret
-      - LIVEKIT_URL=ws://ruta_a_livekit
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-devsecret_change_me_min_32_chars_long}
+      # URL interna (red de Docker) para el SDK server: RoomService, webhooks, etc.
+      - LIVEKIT_URL=http://livekit:7880
+      # URL que se le devuelve al cliente junto con el token: el browser se conecta directo a LiveKit
+      - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL:-ws://localhost:7880}
     depends_on:
       voice-redis:
         condition: service_healthy
+      livekit:
+        condition: service_healthy
+    networks:
+      - discordia-net
+
+  livekit:
+    image: livekit/livekit-server:v1.13.7
+    container_name: discordia-livekit
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    ports:
+      - "7880:7880"       # API + señalización WebSocket
+      - "7881:7881"       # Media WebRTC por TCP (fallback)
+      - "7882:7882/udp"   # Media WebRTC por UDP
+    environment:
+      - "LIVEKIT_KEYS=${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:-devsecret_change_me_min_32_chars_long}"
+      # IP que LiveKit anuncia a los clientes para la media. En local, 127.0.0.1;
+      # en un deploy, la IP pública del host.
+      - NODE_IP=${LIVEKIT_NODE_IP:-127.0.0.1}
+    volumes:
+      - ./livekit/livekit.yaml:/etc/livekit.yaml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7880 > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     networks:
       - discordia-net
 
