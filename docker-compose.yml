@@ -66,18 +66,27 @@ services:
     ports:
       - "8004:8000"
     environment:
+      - ENVIRONMENT=development
       - DATABASE_HOST=auth-db
+      - DATABASE_PORT=5432
       - DATABASE_USER=postgres
       - DATABASE_PASSWORD=postgres
       - DATABASE_NAME=auth_db
     depends_on:
       auth-db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks:
       - discordia-net
 
   auth-db:
-    image: postgres:15-alpine
+    # Misma versión mayor que el CI del servicio (ADR-004).
+    image: postgres:16-alpine
     container_name: discordia-auth-db
     restart: unless-stopped
     ports:

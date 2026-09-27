@@ -1,6 +1,5 @@
 # Entorno de desarrollo local con Hot Module Replacement (HMR)
-# Para activar: cp docker-compose.override.yml.example docker-compose.override.yml && docker compose up -d webapp
-
+# Para activar: cp docker-compose.override.yml.example docker-compose.override.yml && docker compose up -d
 services:
   webapp:
     build:
@@ -18,3 +17,9 @@ services:
     # En desarrollo corre Vite (puerto 5173), desactivamos el healthcheck de Nginx (puerto 80)
     healthcheck:
       disable: true
+
+  auth-service:
+    # Igual al CMD del Dockerfile, más --reload: uvicorn reinicia al detectar cambios en el código montado.
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    volumes:
+      - ./Auth-User-Service:/app
