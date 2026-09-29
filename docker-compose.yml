@@ -68,10 +68,10 @@ services:
       - "8004:8000"
     environment:
       - ENVIRONMENT=development
-      - DATABASE_HOST=auth-db
-      - DATABASE_PORT=5432
-      - DATABASE_USER=postgres
-      - DATABASE_PASSWORD=postgres
+      - DATABASE_HOST=${RDS_HOST}
+      - DATABASE_PORT=${RDS_PORT:-5432}
+      - DATABASE_USER=${RDS_USER}
+      - DATABASE_PASSWORD=${RDS_PASSWORD}
       - DATABASE_NAME=auth_db
 
       - AUTH0_DOMAIN=${AUTH0_DOMAIN:-dev-dppme5iaqg60gkmo.us.auth0.com}
@@ -86,8 +86,6 @@ services:
       - RABBITMQ_USER=${RABBITMQ_USER:-admin}
       - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-admin}
     depends_on:
-      auth-db:
-        condition: service_healthy
       rabbitmq:
         condition: service_healthy
     healthcheck:
@@ -126,26 +124,6 @@ services:
       - discordia-net
     env_file:
     - ./Auth-User-Service/.env
-
-  auth-db:
-    image: postgres:16-alpine
-    container_name: discordia-auth-db
-    restart: unless-stopped
-    ports:
-      - "5436:5432"
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: auth_db
-    volumes:
-      - auth-db-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d auth_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - discordia-net
 
   # ==========================================
   # MESSAGE BROKER (compartido por la plataforma)
@@ -188,36 +166,14 @@ services:
       - HOST=0.0.0.0
       - PORT=8080
       - PYTHONPATH=/app
-      - DATABASE_HOST=server-roles-db
-      - DATABASE_NAME=db
-      - DATABASE_PORT=5432
-      - DATABASE_USER=admin
-      - DATABASE_PASSWORD=password
+      - DATABASE_HOST=${RDS_HOST}
+      - DATABASE_NAME=server_roles_db
+      - DATABASE_PORT=${RDS_PORT:-5432}
+      - DATABASE_USER=${RDS_USER}
+      - DATABASE_PASSWORD=${RDS_PASSWORD}
     volumes:
-      - ./Server-Roles-Core-Service:/app
-    depends_on:
-      server-roles-db:
-        condition: service_healthy
-    networks:
-      - discordia-net
-
-  server-roles-db:
-    image: postgres:16-alpine
-    container_name: discordia-server-roles-db
-    restart: unless-stopped
-    ports:
-      - "5433:5432"
-    environment:
-      POSTGRES_DB: db
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: password
-    volumes:
-      - server-roles-db-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U admin -d db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+    - ./Server-Roles-Core-Service:/app
+    depends_on: {}
     networks:
       - discordia-net
 
@@ -233,30 +189,8 @@ services:
     ports:
       - "8003:8000"
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@payments-db:5432/payments_db
-    depends_on:
-      payments-db:
-        condition: service_healthy
-    networks:
-      - discordia-net
-
-  payments-db:
-    image: postgres:15-alpine
-    container_name: discordia-payments-db
-    restart: unless-stopped
-    ports:
-      - "5434:5432"
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: payments_db
-    volumes:
-      - payments-db-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d payments_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+    - DATABASE_URL=postgresql://${RDS_USER}:${RDS_PASSWORD}@${RDS_HOST}:${RDS_PORT:-5432}/payments_db
+    depends_on: {}
     networks:
       - discordia-net
 
@@ -408,36 +342,13 @@ services:
       - "3001:3000"
     environment:
       - PORT=3000
-      - DATABASE_URL=postgresql://postgres:password@notification-db:5432/notification_db
-    depends_on:
-      notification-db:
-        condition: service_healthy
+      - DATABASE_URL=postgresql://${RDS_USER}:${RDS_PASSWORD}@${RDS_HOST}:${RDS_PORT:-5432}/notification_db
+    depends_on: {}
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/livez > /dev/null || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 3
-      start_period: 5s
-    networks:
-      - discordia-net
-
-  notification-db:
-    image: postgres:16-alpine
-    container_name: discordia-notification-db
-    restart: unless-stopped
-    ports:
-      - "5435:5432"
-    environment:
-      POSTGRES_DB: notification_db
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
-    volumes:
-      - notification-db-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d notification_db"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
       start_period: 5s
     networks:
       - discordia-net
@@ -479,10 +390,6 @@ networks:
     driver: bridge
 
 volumes:
-  auth-db-data:
-  server-roles-db-data:
-  payments-db-data:
-  chat-mongo-data:
-  chat-redis-data:
-  notification-db-data:
-  rabbitmq-data:
+  chat-mongo-data: null
+  chat-redis-data: null
+  rabbitmq-data: null
