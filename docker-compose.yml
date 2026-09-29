@@ -124,6 +124,8 @@ services:
         condition: service_healthy
     networks:
       - discordia-net
+    env_file:
+    - ./Auth-User-Service/.env
 
   auth-db:
     image: postgres:16-alpine
