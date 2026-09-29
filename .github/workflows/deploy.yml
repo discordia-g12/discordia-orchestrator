@@ -13,30 +13,21 @@ jobs:
       - name: Descargar código (Checkout)
         uses: actions/checkout@v4
 
-      - name: Copiar archivos al servidor EC2
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: "."
-          target: "~/discordia"
-          rm: true # borra los archivos viejos en el destino 
-
-      - name: Construir y levantar contenedores
+      - name: Actualizar y levantar contenedores en EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            cd ~/discordia
+            cd ~/discordia-orchestrator
             
-            # (OPCIONAL) Exportar variables secretas si lo necesitamos
-            # export DATABASE_PASSWORD=${{ secrets.DB_PASS }}
+            # Actualizamos el código desde GitHub
+            git pull origin main
+            git submodule update --init --recursive
             
             # Levantamos los servicios reconstruyendo las imágenes si hubo cambios
-            docker-compose up -d --build
+            docker compose up -d --build
             
             # Limpiamos las imágenes viejas que quedaron sin uso para liberar disco
             docker image prune -f
