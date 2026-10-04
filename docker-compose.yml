@@ -304,6 +304,8 @@ services:
       # IP que LiveKit anuncia a los clientes para la media. En local, 127.0.0.1;
       # en un deploy, la IP pública del host.
       - NODE_IP=${LIVEKIT_NODE_IP:-127.0.0.1}
+      # Key con la que LiveKit firma los webhooks hacia voice-signaling-service (ver livekit.yaml)
+      - LIVEKIT_WEBHOOK_API_KEY=${LIVEKIT_API_KEY:-devkey}
     volumes:
       - ./livekit/livekit.yaml:/etc/livekit.yaml:ro
     healthcheck:
