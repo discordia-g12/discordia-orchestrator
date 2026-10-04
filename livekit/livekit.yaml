@@ -16,8 +16,9 @@ rtc:
 logging:
   level: info
 
-# Cuando voice-signaling-service exponga el endpoint de webhooks, habilitar:
-# webhook:
-#   api_key: devkey
-#   urls:
-#     - http://voice-signaling-service:8080/api/v1/voice/webhooks/livekit
+# Avisa a voice-signaling-service cuando alguien entra o sale de una sala, para limpiar su sesión
+# aunque no haya llamado a /leave (cerró la pestaña, se quedó sin red). La api_key con la que se
+# firman se pasa por LIVEKIT_WEBHOOK_API_KEY desde docker-compose.yml.
+webhook:
+  urls:
+    - http://voice-signaling-service:8080/webhooks/livekit
