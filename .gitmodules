@@ -25,3 +25,6 @@
 [submodule "Discordia-WebApp"]
 	path = Discordia-WebApp
 	url = https://github.com/discordia-g12/Discordia-WebApp.git
+[submodule "observability"]
+	path = observability
+	url = https://github.com/discordia-g12/discordia-observability.git
