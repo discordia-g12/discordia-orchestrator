@@ -1,0 +1,49 @@
+# Prometheus del nodo infra: lee los exportadores de los tres nodos por IP:puerto (los mismos que publica
+# cada nodo). Plantilla: __EDGE_HOST__, __REALTIME_HOST__, __INFRA_HOST__ y __ENVIRONMENT__ se completan
+# al arrancar el contenedor (ver el servicio prometheus en deploy/docker-compose.yml).
+# Basado en observability/prometheus/prometheus.yml (un solo host): mismas reglas de relabel.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    env: __ENVIRONMENT__
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # cAdvisor: CPU, memoria, red y disco de cada contenedor. El label node dice de qué máquina viene.
+  - job_name: cadvisor
+    static_configs:
+      - targets: ['__EDGE_HOST__:9180']
+        labels: { node: edge }
+      - targets: ['__REALTIME_HOST__:9180']
+        labels: { node: realtime }
+      - targets: ['__INFRA_HOST__:9180']
+        labels: { node: infra }
+    metric_relabel_configs:
+      # Nombre del servicio de Compose → label service (igual que en observability/)
+      - source_labels: [container_label_com_docker_compose_service]
+        target_label: service
+        action: replace
+      - regex: 'container_label_.*|id'
+        action: labeldrop
+
+  # node_exporter: CPU, memoria y disco de cada máquina
+  - job_name: node-exporter
+    static_configs:
+      - targets: ['__EDGE_HOST__:9100']
+        labels: { node: edge }
+      - targets: ['__REALTIME_HOST__:9100']
+        labels: { node: realtime }
+      - targets: ['__INFRA_HOST__:9100']
+        labels: { node: infra }
+
+  # RabbitMQ (plugin rabbitmq_prometheus, habilitado en rabbitmq/enabled_plugins): mismo nodo y red
+  - job_name: rabbitmq
+    static_configs:
+      - targets: ['rabbitmq:15692']
+        labels: { node: infra }
