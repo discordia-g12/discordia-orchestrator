@@ -558,7 +558,8 @@ services:
     ports:
       - "8003:8000" # Kong (nodo edge)
     environment:
-      - DATABASE_URL=postgresql://payments_user:${PAYMENTS_DB_PASSWORD:-dev-payments}@infra-db:5432/payments_db
+      # Driver explícito: SQLAlchemy 2.1 cambió el default de postgresql:// a psycopg 3 (la imagen trae psycopg2)
+      - DATABASE_URL=postgresql+psycopg2://payments_user:${PAYMENTS_DB_PASSWORD:-dev-payments}@infra-db:5432/payments_db
     depends_on:
       infra-db:
         condition: service_healthy

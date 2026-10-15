@@ -302,7 +302,8 @@ services:
     ports:
       - "8003:8000"
     environment:
-    - DATABASE_URL=postgresql://${RDS_USER}:${RDS_PASSWORD}@${RDS_HOST}:${RDS_PORT:-5432}/payments_db
+    # Driver explícito: SQLAlchemy 2.1 cambió el default de postgresql:// a psycopg 3 (la imagen trae psycopg2)
+    - DATABASE_URL=postgresql+psycopg2://${RDS_USER}:${RDS_PASSWORD}@${RDS_HOST}:${RDS_PORT:-5432}/payments_db
     depends_on:
       postgres:
         condition: service_healthy
