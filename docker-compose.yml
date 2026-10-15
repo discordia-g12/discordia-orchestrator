@@ -12,20 +12,15 @@ services:
       - "8000:8000"
       - "8001:8001"
     environment:
-      - KONG_DATABASE=off
-      - KONG_DECLARATIVE_CONFIG=/usr/local/kong/declarative/kong.yml
+      # El resto de la configuración de Kong viene en la imagen (Gateway/Dockerfile).
+      # Los destinos de los servicios usan los defaults de Gateway/render-config.sh (nombres de este compose).
       - KONG_ADMIN_LISTEN=0.0.0.0:8001
-      - KONG_LUA_PACKAGE_PATH=/usr/local/share/lua/5.1/?.lua;;
-      - KONG_NGINX_HTTP_INCLUDE=/etc/kong/shared-dicts.conf
-      - KONG_NGINX_MAIN_INCLUDE=/etc/kong/main-env.conf
-      - KONG_UNTRUSTED_LUA_SANDBOX_REQUIRES=gateway_health,auth0_validator,resty.openidc
-      - KONG_LUA_SSL_TRUSTED_CERTIFICATE=/etc/ssl/certs/ca-certificates.crt
-      - KONG_LUA_SSL_VERIFY_DEPTH=5
       - KONG_NGINX_WORKER_PROCESSES=1
     env_file:
       - ./Gateway/.env
     volumes:
-      - ./Gateway/kong.yml:/usr/local/kong/declarative/kong.yml:ro
+      # Montados encima de los de la imagen para editar sin reconstruir (reiniciar el contenedor)
+      - ./Gateway/kong.yml:/etc/kong/kong.yml.tmpl:ro
       - ./Gateway/auth0_validator.lua:/usr/local/share/lua/5.1/auth0_validator.lua:ro
       - ./Gateway/gateway_health.lua:/usr/local/share/lua/5.1/gateway_health.lua:ro
       - ./Gateway/nginx/shared-dicts.conf:/etc/kong/shared-dicts.conf:ro

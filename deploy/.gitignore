@@ -1,0 +1,7 @@
+.env
+gateway.env
+tls/
+# .env de la versión anterior (un compose por nodo)
+edge/
+realtime/
+infra/
