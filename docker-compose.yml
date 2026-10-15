@@ -67,6 +67,32 @@ services:
         aliases:
           - redis
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: discordia-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${RDS_USER:-postgres}
+      POSTGRES_PASSWORD: ${RDS_PASSWORD:-postgres}
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-dbs.sql:/docker-entrypoint-initdb.d/init-dbs.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${RDS_USER:-postgres} -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+    networks:
+      - discordia-net
+
   # ==========================================
   # 1. AUTH & USER SERVICE (Python / FastAPI)
   # ==========================================
@@ -99,6 +125,8 @@ services:
       - RABBITMQ_USER=${RABBITMQ_USER:-admin}
       - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-admin}
     depends_on:
+      postgres:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
     healthcheck:
@@ -153,8 +181,6 @@ services:
           memory: 128M
     networks:
       - discordia-net
-    env_file:
-    - ./Auth-User-Service/.env
 
   # ==========================================
   # MESSAGE BROKER (compartido por la plataforma)
@@ -211,7 +237,9 @@ services:
       - DATABASE_PASSWORD=${RDS_PASSWORD}
     volumes:
     - ./Server-Roles-Core-Service:/app
-    depends_on: {}
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=3)"]
       interval: 10s
@@ -224,6 +252,46 @@ services:
         limits:
           cpus: "0.50"
           memory: 256M
+    networks:
+      - discordia-net
+
+  server-roles-outbox-worker:
+    build:
+      context: ./Server-Roles-Core-Service
+      dockerfile: Dockerfile
+    container_name: discordia-server-roles-outbox-worker
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.outbox_publisher"]
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_HOST=${RDS_HOST}
+      - DATABASE_PORT=${RDS_PORT:-5432}
+      - DATABASE_USER=${RDS_USER}
+      - DATABASE_PASSWORD=${RDS_PASSWORD}
+      - DATABASE_NAME=server_roles_db
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=${RABBITMQ_USER:-admin}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-admin}
+      - RABBITMQ_EXCHANGE=server.events
+    volumes:
+      - ./Server-Roles-Core-Service:/app
+    depends_on:
+      server-roles-service:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(0 if time.time() - os.stat('/tmp/outbox-heartbeat').st_mtime < 30 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: 128M
     networks:
       - discordia-net
 
@@ -240,7 +308,9 @@ services:
       - "8003:8000"
     environment:
     - DATABASE_URL=postgresql://${RDS_USER}:${RDS_PASSWORD}@${RDS_HOST}:${RDS_PORT:-5432}/payments_db
-    depends_on: {}
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)"]
       interval: 10s
@@ -271,11 +341,14 @@ services:
       - MONGO_URI=mongodb://chat-mongo:27017/chat_db
       - CORE_SERVICE_URL=http://server-roles-service:8080
       - REDIS_URL=redis://chat-redis:6379
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@rabbitmq:5672/
       - NODE_OPTIONS=--max-old-space-size=192
     depends_on:
       chat-mongo:
         condition: service_healthy
       chat-redis:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/readyz > /dev/null || exit 1"]
@@ -451,7 +524,9 @@ services:
       - PORT=3000
       - DATABASE_URL=postgresql://${RDS_USER}:${RDS_PASSWORD}@${RDS_HOST}:${RDS_PORT:-5432}/notification_db
       - NODE_OPTIONS=--max-old-space-size=96
-    depends_on: {}
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/readyz > /dev/null || exit 1"]
       interval: 10s
@@ -508,6 +583,7 @@ networks:
     driver: bridge
 
 volumes:
+  postgres-data: null
   chat-mongo-data: null
   chat-redis-data: null
   rabbitmq-data: null
