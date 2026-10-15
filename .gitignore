@@ -21,3 +21,4 @@ yarn-error.log*
 *.key
 *.pem
 *.tfvars
+*.pkg
