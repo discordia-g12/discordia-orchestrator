@@ -6,21 +6,28 @@ variable "region" {
 
 variable "availability_zone_id" {
   description = <<-EOT
-    AZ ID (no nombre) donde van los tres nodos. Los nombres (us-east-1a) se asignan distinto en cada
-    cuenta; el ID es el mismo en todas, así los nodos quedan en la misma zona física y el tráfico entre
-    ellos no paga transferencia entre AZs.
+    AZ ID (no nombre) de la subnet pública, donde van las tres EC2 (y, si AWS lo elige, el RDS). Se usa el
+    ID porque el nombre (us-east-1a) se asigna distinto en cada cuenta.
   EOT
   type        = string
   default     = "use1-az1"
 }
 
-variable "aws_profiles" {
-  description = "Profile de ~/.aws/credentials de la cuenta de cada nodo"
-  type = object({
-    edge     = string
-    realtime = string
-    infra    = string
-  })
+variable "data_secondary_az_id" {
+  description = "Segunda AZ para la subnet de datos: AWS exige que el grupo de subnets del RDS cubra dos zonas"
+  type        = string
+  default     = "use1-az2"
+}
+
+variable "aws_profile" {
+  description = "Profile de ~/.aws/credentials de la cuenta de AWS (los tres nodos y el RDS)"
+  type        = string
+}
+
+variable "rds_identifier" {
+  description = "Identificador del RDS que ya existe (se mueve a la VPC con la CLI, ver README)"
+  type        = string
+  default     = "discordia-db-cluster"
 }
 
 variable "instance_type" {

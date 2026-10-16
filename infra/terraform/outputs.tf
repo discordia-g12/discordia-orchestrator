@@ -1,5 +1,5 @@
 output "nodes" {
-  description = "IPs de cada nodo: las privadas van en los .env y en el kong.yml de producción"
+  description = "IPs de cada nodo: las privadas van en los nodes.env (EDGE_HOST, REALTIME_HOST, INFRA_HOST)"
   value = {
     edge     = { private_ip = module.edge.private_ip, public_ip = module.edge.public_ip, instance_id = module.edge.instance_id }
     realtime = { private_ip = module.realtime.private_ip, public_ip = module.realtime.public_ip, instance_id = module.realtime.instance_id }
@@ -8,15 +8,25 @@ output "nodes" {
 }
 
 output "ssm_connect" {
-  description = "Cómo entrar a cada nodo (sin SSH): aws ssm start-session con el profile de su cuenta"
+  description = "Cómo entrar a cada nodo (sin SSH)"
   value = {
-    edge     = "aws ssm start-session --profile ${var.aws_profiles.edge} --target ${module.edge.instance_id}"
-    realtime = "aws ssm start-session --profile ${var.aws_profiles.realtime} --target ${module.realtime.instance_id}"
-    infra    = "aws ssm start-session --profile ${var.aws_profiles.infra} --target ${module.infra.instance_id}"
+    edge     = "aws ssm start-session --profile ${var.aws_profile} --target ${module.edge.instance_id}"
+    realtime = "aws ssm start-session --profile ${var.aws_profile} --target ${module.realtime.instance_id}"
+    infra    = "aws ssm start-session --profile ${var.aws_profile} --target ${module.infra.instance_id}"
   }
 }
 
+output "rds_endpoint" {
+  description = "DB_HOST de los nodes.env"
+  value       = data.aws_db_instance.main.address
+}
+
+output "rds_move_command" {
+  description = "Comando para mover el RDS a esta VPC (una sola vez, ver README)"
+  value       = "aws rds modify-db-instance --profile ${var.aws_profile} --db-instance-identifier ${var.rds_identifier} --db-subnet-group-name ${aws_db_subnet_group.data.name} --vpc-security-group-ids ${aws_security_group.rds.id} --apply-immediately"
+}
+
 output "cloudflare_trusted_ips" {
-  description = "Rangos IPv4 de Cloudflare para KONG_TRUSTED_IPS (deploy/edge/gateway.env)"
+  description = "Rangos IPv4 de Cloudflare para KONG_TRUSTED_IPS (deploy/gateway.env)"
   value       = join(",", local.cloudflare_ipv4)
 }

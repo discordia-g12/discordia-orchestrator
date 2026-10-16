@@ -4,18 +4,18 @@ locals {
     ManagedBy = "terraform"
   }
 
-  # Rangos sin superposición: requisito del VPC peering entre las tres cuentas
-  cidrs = {
-    edge     = "10.10.0.0/16"
-    realtime = "10.20.0.0/16"
-    infra    = "10.30.0.0/16"
-  }
+  nodes = ["edge", "realtime", "infra"]
 
-  # IPs privadas fijas: son las que van en los .env de cada servicio y en el kong.yml de producción
+  vpc_cidr       = "10.0.0.0/16"
+  public_cidr    = "10.0.1.0/24"  # las 3 EC2
+  data_a_cidr    = "10.0.64.0/24" # RDS (sin salida a internet)
+  data_b_cidr    = "10.0.65.0/24" # RDS: segunda zona, exigida por el grupo de subnets
+
+  # IPs privadas fijas: van en los nodes.env (EDGE_HOST, REALTIME_HOST, INFRA_HOST)
   private_ips = {
-    edge     = "10.10.1.10"
-    realtime = "10.20.1.10"
-    infra    = "10.30.1.10"
+    edge     = "10.0.1.10"
+    realtime = "10.0.1.20"
+    infra    = "10.0.1.30"
   }
 
   # Solo Cloudflare puede llegarle a Kong (el origen no queda expuesto a internet)

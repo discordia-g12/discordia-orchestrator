@@ -1,13 +1,11 @@
 # Copiar a terraform.tfvars (está en .gitignore) y completar.
-aws_profiles = {
-  edge     = "discordia-edge"     # cuenta de AWS de quien aloja el nodo 1
-  realtime = "discordia-realtime" # cuenta del nodo 2
-  infra    = "discordia-infra"    # cuenta del nodo 3
-}
+aws_profile = "discordia-edge" # cuenta de AWS de los tres nodos y el RDS
 
-budget_alert_email = "equipo@ejemplo.com"
+instance_type = "t3.micro"
+
+budget_alert_email    = "equipo@ejemplo.com"
 cloudflare_zone_id    = "<zone id de discordia.lol>"
 cloudflare_account_id = "<account id de Cloudflare>"
 
-# Recién en el corte (fase 5): Terraform pasa a administrar api.discordia.lol y app.discordia.lol
+# Recién en el corte: Terraform pasa a administrar api.discordia.lol y app.discordia.lol
 manage_dns = false

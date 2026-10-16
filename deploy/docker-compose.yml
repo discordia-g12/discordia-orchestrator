@@ -7,7 +7,7 @@
 #   - Producción (una EC2 por nodo): la IP privada de cada nodo (terraform output nodes).
 #
 # Qué nodos se levantan lo decide COMPOSE_PROFILES (en el .env):
-#   local:      COMPOSE_PROFILES=edge,realtime,infra,local   (local = suma Mongo en contenedor)
+#   local:      COMPOSE_PROFILES=edge,realtime,infra,local   (local = suma Mongo y un Postgres que hace de RDS)
 #   EC2 edge:   COMPOSE_PROFILES=edge
 #
 #   docker compose -f deploy/docker-compose.yml up -d --build
@@ -28,7 +28,7 @@ x-cross-node: &cross-node
 
 services:
   # ======================================================================
-  # NODO 1 — EDGE: Kong, Auth (+worker), Server-Roles (+worker), Postgres
+  # NODO 1 — EDGE: Kong, Auth (+worker), Server-Roles (+worker)
   # ======================================================================
   gateway:
     profiles: ["edge"]
@@ -104,11 +104,12 @@ services:
     restart: unless-stopped
     environment: &auth-env
       ENVIRONMENT: ${ENVIRONMENT:-production}
-      DATABASE_HOST: edge-db
+      # RDS (local: el Postgres de desarrollo del profile local, por host.docker.internal:5432)
+      DATABASE_HOST: ${DB_HOST:-host.docker.internal}
       DATABASE_PORT: "5432"
       DATABASE_NAME: auth_db
-      DATABASE_USER: auth_user
-      DATABASE_PASSWORD: ${AUTH_DB_PASSWORD:-dev-auth}
+      DATABASE_USER: ${DB_USER:-postgres}
+      DATABASE_PASSWORD: ${DB_PASSWORD:-dev-postgres}
       AUTH0_DOMAIN: ${AUTH0_DOMAIN:-dev-dppme5iaqg60gkmo.us.auth0.com}
       AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-f2H8PhlKDl3KSIm64G5mHAeQih7iFyIP}
       AUTH0_DB_CONNECTION: Username-Password-Authentication
@@ -120,8 +121,9 @@ services:
       RABBITMQ_USER: ${RABBITMQ_USER:-admin}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-admin}
     depends_on:
-      edge-db:
+      local-postgres:
         condition: service_healthy
+        required: false # solo existe con el profile local (en producción la base es el RDS)
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)"]
       interval: 10s
@@ -175,18 +177,19 @@ services:
     environment: &server-roles-env
       ENVIRONMENT: ${ENVIRONMENT:-production}
       PYTHONPATH: /app
-      DATABASE_HOST: edge-db
+      DATABASE_HOST: ${DB_HOST:-host.docker.internal}
       DATABASE_PORT: "5432"
       DATABASE_NAME: server_roles_db
-      DATABASE_USER: server_roles_user
-      DATABASE_PASSWORD: ${SERVER_ROLES_DB_PASSWORD:-dev-server-roles}
+      DATABASE_USER: ${DB_USER:-postgres}
+      DATABASE_PASSWORD: ${DB_PASSWORD:-dev-postgres}
       RABBITMQ_HOST: ${INFRA_HOST:-host.docker.internal}
       RABBITMQ_PORT: "5672"
       RABBITMQ_USER: ${RABBITMQ_USER:-admin}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-admin}
     depends_on:
-      edge-db:
+      local-postgres:
         condition: service_healthy
+        required: false # solo existe con el profile local
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=3)"]
       interval: 10s
@@ -224,34 +227,8 @@ services:
           memory: 128M
     networks: [edge]
 
-  # Un Postgres para los dos servicios del nodo, con una base y un usuario por servicio
-  edge-db:
-    profiles: ["edge"]
-    image: postgres:16-alpine
-    restart: unless-stopped
-    command: ["postgres", "-c", "shared_buffers=48MB"]
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-dev-postgres}
-      AUTH_DB_PASSWORD: ${AUTH_DB_PASSWORD:-dev-auth}
-      SERVER_ROLES_DB_PASSWORD: ${SERVER_ROLES_DB_PASSWORD:-dev-server-roles}
-    volumes:
-      - edge-db-data:/var/lib/postgresql/data
-      - ./postgres-init/edge:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    deploy:
-      resources:
-        limits:
-          cpus: "0.50"
-          memory: 192M
-    networks: [edge]
-
   # ======================================================================
-  # NODO 2 — REALTIME: Chat, Voice, LiveKit, Notification, Postgres, Redis
+  # NODO 2 — REALTIME: Chat, Voice, LiveKit, Notification, Redis
   # ======================================================================
   chat-engine-service:
     profiles: ["realtime"]
@@ -425,11 +402,14 @@ services:
       - "3001:3000" # Kong (nodo edge)
     environment:
       - PORT=3000
-      - DATABASE_URL=postgresql://notification_user:${NOTIFICATION_DB_PASSWORD:-dev-notification}@realtime-db:5432/notification_db
+      # RDS. La librería pg de Node no cifra si la URL no lo pide: en producción NOTIFICATION_DB_SSLMODE=no-verify
+      # (cifra sin validar el certificado de Amazon, que Node no trae); en local, disable.
+      - DATABASE_URL=postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-dev-postgres}@${DB_HOST:-host.docker.internal}:5432/notification_db?sslmode=${NOTIFICATION_DB_SSLMODE:-disable}
       - NODE_OPTIONS=--max-old-space-size=96
     depends_on:
-      realtime-db:
+      local-postgres:
         condition: service_healthy
+        required: false # solo existe con el profile local
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/readyz > /dev/null || exit 1"]
       interval: 10s
@@ -443,31 +423,8 @@ services:
           memory: 128M
     networks: [realtime]
 
-  realtime-db:
-    profiles: ["realtime"]
-    image: postgres:16-alpine
-    restart: unless-stopped
-    command: ["postgres", "-c", "shared_buffers=32MB"]
-    environment:
-      POSTGRES_USER: notification_user
-      POSTGRES_PASSWORD: ${NOTIFICATION_DB_PASSWORD:-dev-notification}
-      POSTGRES_DB: notification_db
-    volumes:
-      - realtime-db-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U notification_user -d notification_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    deploy:
-      resources:
-        limits:
-          cpus: "0.25"
-          memory: 128M
-    networks: [realtime]
-
   # ======================================================================
-  # NODO 3 — INFRA: RabbitMQ, Payments, Postgres, Prometheus y Grafana
+  # NODO 3 — INFRA: RabbitMQ, Payments, Prometheus y Grafana
   # ======================================================================
   # Prometheus lee los exportadores de los tres nodos por IP:puerto (deploy/observability/).
   # Dashboards, datasource y reglas: submódulo observability (Pilar).
@@ -559,10 +516,11 @@ services:
       - "8003:8000" # Kong (nodo edge)
     environment:
       # Driver explícito: SQLAlchemy 2.1 cambió el default de postgresql:// a psycopg 3 (la imagen trae psycopg2)
-      - DATABASE_URL=postgresql+psycopg2://payments_user:${PAYMENTS_DB_PASSWORD:-dev-payments}@infra-db:5432/payments_db
+      - DATABASE_URL=postgresql+psycopg2://${DB_USER:-postgres}:${DB_PASSWORD:-dev-postgres}@${DB_HOST:-host.docker.internal}:5432/payments_db
     depends_on:
-      infra-db:
+      local-postgres:
         condition: service_healthy
+        required: false # solo existe con el profile local
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)"]
       interval: 10s
@@ -576,28 +534,37 @@ services:
           memory: 192M
     networks: [infra]
 
-  infra-db:
-    profiles: ["infra"]
-    image: postgres:16-alpine
+  # ======================================================================
+  # SOLO LOCAL: Postgres que hace de RDS (profile local)
+  # En producción la base es el RDS (DB_HOST). Acá se publica en el 5432 del host y los servicios le
+  # llegan por host.docker.internal:5432, igual que al RDS desde las EC2. Crea las cuatro bases con
+  # init-dbs.sql (el mismo del compose de la raíz).
+  # ======================================================================
+  local-postgres:
+    profiles: ["local"]
+    image: postgres:18-alpine # misma versión mayor que el RDS
     restart: unless-stopped
-    command: ["postgres", "-c", "shared_buffers=32MB"]
+    command: ["postgres", "-c", "shared_buffers=48MB"]
+    ports:
+      - "5432:5432"
     environment:
-      POSTGRES_USER: payments_user
-      POSTGRES_PASSWORD: ${PAYMENTS_DB_PASSWORD:-dev-payments}
-      POSTGRES_DB: payments_db
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dev-postgres}
+      POSTGRES_DB: postgres
     volumes:
-      - infra-db-data:/var/lib/postgresql/data
+      - local-postgres-data:/var/lib/postgresql
+      - ../init-dbs.sql:/docker-entrypoint-initdb.d/init-dbs.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U payments_user -d payments_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
     deploy:
       resources:
         limits:
-          cpus: "0.25"
-          memory: 128M
-    networks: [infra]
+          cpus: "0.50"
+          memory: 256M
+    networks: [data]
 
   # ======================================================================
   # EN LOS TRES NODOS: exportadores de métricas (cada máquina reporta lo suyo)
@@ -653,13 +620,12 @@ networks:
   edge:
   realtime:
   infra:
+  data: # solo local (local-postgres)
 
 volumes:
-  edge-db-data:
+  local-postgres-data:
   chat-redis-data:
   chat-mongo-data:
-  realtime-db-data:
   rabbitmq-data:
-  infra-db-data:
   prometheus-data:
   grafana-data:
