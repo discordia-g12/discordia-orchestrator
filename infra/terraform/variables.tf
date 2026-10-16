@@ -13,10 +13,10 @@ variable "availability_zone_id" {
   default     = "use1-az1"
 }
 
-variable "data_secondary_az_id" {
-  description = "Segunda AZ para la subnet de datos: AWS exige que el grupo de subnets del RDS cubra dos zonas"
+variable "rds_availability_zone" {
+  description = "Zona donde vive el RDS (no cambia al moverlo de VPC): el grupo de subnets necesita una subnet ahí. Es también la segunda zona que exige AWS"
   type        = string
-  default     = "use1-az2"
+  default     = "us-east-1f"
 }
 
 variable "aws_profile" {

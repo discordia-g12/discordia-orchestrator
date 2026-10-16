@@ -56,12 +56,18 @@ resource "aws_subnet" "data_a" {
   tags = { Name = "discordia-data-a" }
 }
 
+# En la zona actual del RDS: al cambiarlo de VPC, AWS lo deja en la misma zona y exige una subnet ahí
 resource "aws_subnet" "data_b" {
-  vpc_id               = aws_vpc.main.id
-  cidr_block           = local.data_b_cidr
-  availability_zone_id = var.data_secondary_az_id
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = local.data_b_cidr
+  availability_zone = var.rds_availability_zone
 
   tags = { Name = "discordia-data-b" }
+
+  # Crear la nueva antes de sacar la vieja del grupo de subnets (si no, AWS no deja borrarla)
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_db_subnet_group" "data" {

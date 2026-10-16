@@ -9,7 +9,7 @@ locals {
   vpc_cidr       = "10.0.0.0/16"
   public_cidr    = "10.0.1.0/24"  # las 3 EC2
   data_a_cidr    = "10.0.64.0/24" # RDS (sin salida a internet)
-  data_b_cidr    = "10.0.65.0/24" # RDS: segunda zona, exigida por el grupo de subnets
+  data_b_cidr    = "10.0.66.0/24" # RDS: su zona actual (us-east-1f) y segunda zona del grupo
 
   # IPs privadas fijas: van en los nodes.env (EDGE_HOST, REALTIME_HOST, INFRA_HOST)
   private_ips = {
