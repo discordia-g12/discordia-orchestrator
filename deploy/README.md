@@ -4,10 +4,15 @@ Un solo compose (`deploy/docker-compose.yml`) para los tres nodos, igual en loca
 
 | Nodo (profile) | Red | Servicios | Puertos publicados (para los otros nodos) |
 |---|---|---|---|
-| `edge` | `edge` | Kong + Redis, Auth (+worker), Server-Roles (+worker), Postgres (`auth_db`, `server_roles_db`) | 443/8443 (Kong), 8002 (Server-Roles internal) |
-| `realtime` | `realtime` | Chat + Redis, Voice + Redis, LiveKit, Notification, Postgres (`notification_db`) | 3000, 8082, 3001, 7880, 7881, 7882/udp |
-| `infra` | `infra` | RabbitMQ, Payments, Postgres (`payments_db`), Prometheus, Grafana | 5672, 8003 |
+| `edge` | `edge` | Kong + Redis, Auth (+worker), Server-Roles (+worker) | 443/8443 (Kong), 8002 (Server-Roles internal) |
+| `realtime` | `realtime` | Chat + Redis, Voice + Redis, LiveKit, Notification | 3000, 8082, 3001, 7880, 7881, 7882/udp |
+| `infra` | `infra` | RabbitMQ, Payments, Prometheus, Grafana | 5672, 8003 |
 | los tres | (default) | Node Exporter, cAdvisor (métricas de la máquina y de sus contenedores) | 9100, 9180 (solo para infra) |
+
+**Base de datos:** ningún nodo corre Postgres. Los cuatro servicios con base relacional usan el RDS
+(`DB_HOST`), cada uno con su base: `auth_db`, `server_roles_db` (edge), `notification_db` (realtime) y
+`payments_db` (infra). En local, el profile `local` levanta un Postgres que hace de RDS en el 5432 del host
+(crea las bases con `init-dbs.sql`) y los servicios le llegan por `host.docker.internal:5432`.
 
 **Observabilidad:** Prometheus (infra) lee los exportadores de los tres nodos por IP:puerto
 (`observability/prometheus.yml.tmpl`) y Grafana usa los dashboards del submódulo `observability`.
@@ -24,7 +29,8 @@ igual que entre máquinas distintas.
 - Producción: las IPs privadas de las EC2 (`terraform output nodes`).
 
 Qué nodos se levantan lo decide `COMPOSE_PROFILES`. Fuera de los nodos: la SPA en Cloudflare Pages y el
-historial del chat en MongoDB Atlas (profile `local` = Mongo en contenedor, solo para desarrollo).
+historial del chat en MongoDB Atlas y el RDS (profile `local` = Mongo y Postgres en contenedor, solo
+para desarrollo).
 
 ## Local: los tres nodos en tu máquina
 
@@ -34,14 +40,14 @@ docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
 La API queda en `http://localhost:8000` (y con TLS autofirmado en `https://localhost:8443`). No
-levantar al mismo tiempo el compose de la raíz: usan los mismos puertos.
+levantar al mismo tiempo el compose de la raíz: usan los mismos puertos (también el 5432).
 
 **Probar que un nodo no tumba a los otros** (nombres de servicio: ver la tabla):
 
 ```bash
-docker compose -f deploy/docker-compose.yml stop rabbitmq payments-service infra-db   # "apagar" infra
+docker compose -f deploy/docker-compose.yml stop rabbitmq payments-service   # "apagar" infra
 # el chat y la voz siguen andando; /readyz del chat (localhost:3000/readyz) muestra rabbitmq: disconnected
-docker compose -f deploy/docker-compose.yml start rabbitmq payments-service infra-db
+docker compose -f deploy/docker-compose.yml start rabbitmq payments-service
 ```
 
 Para verificar el aislamiento entre redes: desde un contenedor de edge, un nombre de otro nodo no resuelve
@@ -52,7 +58,7 @@ falla), pero `host.docker.internal:5672` sí responde.
 
 1. Entrar por SSM (`terraform output ssm_connect`) y clonar el orquestador con submódulos en `/opt/discordia`.
 2. Crear `/etc/discordia/nodes.env` (permisos 600) con `COMPOSE_PROFILES=<nodo>`, las IPs privadas de los
-   otros nodos y los secretos de ese nodo (lista completa en `.env.example`). **Todos los secretos tienen
+   otros nodos, el RDS (`DB_HOST`, `DB_USER`, `DB_PASSWORD`) y los secretos de ese nodo (lista completa en `.env.example`). **Todos los secretos tienen
    que estar definidos**: los defaults del compose son solo para desarrollo.
 3. Solo edge: `deploy/gateway.env` (de `gateway.env.example`) y el Origin Certificate de Cloudflare en
    `deploy/tls/` (`origin.pem`, `origin.key`).
@@ -76,5 +82,5 @@ $C up -d --no-build --no-deps auth-service
 
 Los demás servicios no se tocan. Para volver atrás, el SHA anterior.
 
-Si los paquetes de GHCR son privados, la EC2 necesita `docker login ghcr.io` con un token de GitHub de
-solo lectura (`read:packages`). Si los repos son públicos, conviene hacer públicas también las imágenes.
+Los paquetes de GHCR son privados, la EC2 necesita `docker login ghcr.io` con un token de GitHub de
+solo lectura (`read:packages`). 

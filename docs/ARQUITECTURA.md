@@ -1,7 +1,9 @@
 # Arquitectura y despliegue de Discordia
 
-> Estado al 15/10/2026. Describe la arquitectura de tres nodos que reemplaza al monolito (una sola EC2 con
+> Estado al 16/10/2026. Describe la arquitectura de tres nodos que reemplaza al monolito (una sola EC2 con
 > `docker-compose.yml`), cómo se comunican los servicios, cómo se despliega y qué falta para el corte.
+> Cambio del 16/10: **una sola VPC** (antes una por nodo con peering) y **todas las bases en el RDS** (antes
+> un Postgres en contenedor por nodo).
 
 ## Índice
 
@@ -28,18 +30,17 @@
 | Tema | Decisión |
 |---|---|
 | Cómputo | 3 EC2 (`t3.micro`), una por nodo: **edge**, **realtime**, **infra** |
-| Red | Una VPC por nodo, unidas por **VPC peering** (malla de 3 conexiones). IPs privadas fijas |
+| Red | **Una VPC** (`10.0.0.0/16`), una cuenta de AWS. Un **Security Group por nodo** + uno para el RDS. IPs privadas fijas |
 | Entrada de la API | `api.discordia.lol` → **Cloudflare** (proxy, TLS) → **Kong** en edge (443, solo IPs de Cloudflare) |
 | Frontend | SPA en **Cloudflare Pages** (`app.discordia.lol`) |
-| Bases relacionales | **Postgres en contenedor por nodo** (una base y un usuario por servicio). Sin RDS |
+| Bases relacionales | **Un RDS** (`discordia-db-cluster`, Postgres 18, `db.t4g.micro`) con una base por servicio. Ningún nodo corre Postgres |
 | Historial del chat | **MongoDB Atlas M0** |
 | Mensajería | **RabbitMQ** en infra; eventos publicados con el patrón **Outbox** |
 | Audio de voz | **LiveKit** en realtime; el audio va directo por UDP 7882 (no pasa por Cloudflare) |
 | Imágenes | Cada repo las publica en **GHCR** desde su CI (tag = SHA del commit) |
 | Ejecución | **Un solo `deploy/docker-compose.yml`** con un *profile* por nodo; cada EC2 levanta el suyo |
-| Infraestructura | **Terraform** (`infra/terraform/`): EC2, VPCs, peering, Security Groups, DNS y Pages |
+| Infraestructura | **Terraform** (`infra/terraform/`): VPC, subnets, Security Groups, EC2, DNS y Pages. El RDS solo se **lee** (no lo administra) |
 | Observabilidad | Prometheus + Grafana en infra; Node Exporter + cAdvisor en los tres nodos |
-| Costo | $0 de bolsillo: todo con los créditos del plan Free de AWS y planes gratis (Cloudflare, Atlas, GHCR) |
 
 ---
 
@@ -58,26 +59,27 @@ flowchart LR
         PAGES[Pages<br/>app.discordia.lol]
     end
 
-    subgraph EDGE[Nodo edge · 10.10.1.10]
-        KONG[Kong :443]
-        AUTH[Auth-User]
-        SR[Server-Roles]
-        EDB[(Postgres<br/>auth_db · server_roles_db)]
-    end
+    subgraph VPC[VPC 10.0.0.0/16]
+        subgraph EDGE[Nodo edge · 10.0.1.10]
+            KONG[Kong :443]
+            AUTH[Auth-User]
+            SR[Server-Roles]
+        end
 
-    subgraph RT[Nodo realtime · 10.20.1.10]
-        CHAT[Chat-Engine :3000]
-        VOICE[Voice-Signaling :8082]
-        LK[LiveKit :7880 / 7882 udp]
-        NOTIF[Notification :3001]
-        RDB[(Postgres<br/>notification_db)]
-    end
+        subgraph RT[Nodo realtime · 10.0.1.20]
+            CHAT[Chat-Engine :3000]
+            VOICE[Voice-Signaling :8082]
+            LK[LiveKit :7880 / 7882 udp]
+            NOTIF[Notification :3001]
+        end
 
-    subgraph INF[Nodo infra · 10.30.1.10]
-        RMQ[RabbitMQ :5672]
-        PAY[Payments :8003]
-        IDB[(Postgres<br/>payments_db)]
-        PROM[Prometheus + Grafana]
+        subgraph INF[Nodo infra · 10.0.1.30]
+            RMQ[RabbitMQ :5672]
+            PAY[Payments :8003]
+            PROM[Prometheus + Grafana]
+        end
+
+        RDS[(RDS Postgres 18<br/>auth_db · server_roles_db<br/>notification_db · payments_db)]
     end
 
     ATLAS[(MongoDB Atlas M0)]
@@ -88,12 +90,10 @@ flowchart LR
     WEB & APK -->|HTTPS / WSS| PROXY --> KONG
     WEB & APK -.->|audio UDP 7882| LK
     KONG --> AUTH & SR
-    KONG -->|peering| CHAT & VOICE & NOTIF & LK
-    KONG -->|peering| PAY
-    AUTH & SR --> EDB
+    KONG --> CHAT & VOICE & NOTIF & LK
+    KONG --> PAY
+    AUTH & SR & NOTIF & PAY -->|5432 TLS| RDS
     CHAT --> ATLAS
-    NOTIF --> RDB
-    PAY --> IDB
     AUTH & SR -->|eventos outbox| RMQ
     RMQ -->|member.*| CHAT
     CHAT & VOICE -->|can-send / can-connect| SR
@@ -105,10 +105,9 @@ flowchart LR
 
 ## 3. Nodos y servicios
 
-Cada nodo es una EC2 en su propia VPC, con IP privada fija. Los límites de memoria son los de
-`deploy/docker-compose.yml` (el máximo por contenedor, no el uso real).
+Cada nodo es una EC2 en la subnet pública de la VPC, con IP privada fija y su propio Security Group. 
 
-### Edge — `10.10.1.10` (Elastic IP, origen de Cloudflare)
+### Edge — `10.0.1.10` (Elastic IP, origen de Cloudflare)
 
 | Servicio | Imagen | Puerto publicado | Memoria |
 |---|---|---|---|
@@ -118,9 +117,8 @@ Cada nodo es una EC2 en su propia VPC, con IP privada fija. Los límites de memo
 | `auth-outbox-worker` | misma imagen que Auth | — | 128 MB |
 | `server-roles-service` | `ghcr.io/discordia-g12/server-roles-service` | 8002 → 8080 (temporal, solo realtime) | 256 MB |
 | `server-roles-outbox-worker` | misma imagen que Server-Roles | — | 128 MB |
-| `edge-db` | `postgres:16-alpine` | — | 192 MB |
 
-### Realtime — `10.20.1.10` (Elastic IP: `NODE_IP` de LiveKit y allowlist de Atlas)
+### Realtime — `10.0.1.20` (Elastic IP: `NODE_IP` de LiveKit y allowlist de Atlas)
 
 | Servicio | Imagen | Puerto publicado | Memoria |
 |---|---|---|---|
@@ -130,18 +128,33 @@ Cada nodo es una EC2 en su propia VPC, con IP privada fija. Los límites de memo
 | `livekit` | `livekit/livekit-server:v1.13.7` | 7880, 7881/tcp, 7882/udp | 384 MB |
 | `voice-redis` | `redis:7-alpine` | — | 64 MB |
 | `notification-service` | `ghcr.io/discordia-g12/notification-service` | 3001 → 3000 | 128 MB |
-| `realtime-db` | `postgres:16-alpine` | — | 128 MB |
 | `chat-mongo` | `mongo:7.0` | — | 512 MB — **solo local** (profile `local`) |
 
-### Infra — `10.30.1.10` (IP pública automática, solo para salir a internet)
+### Infra — `10.0.1.30` (IP pública automática, solo para salir a internet)
 
 | Servicio | Imagen | Puerto publicado | Memoria |
 |---|---|---|---|
 | `rabbitmq` | `rabbitmq:3-management-alpine` | 5672, 127.0.0.1:15672 (panel) | 320 MB |
 | `payments-service` | `ghcr.io/discordia-g12/payments-service` | 8003 → 8000 | 192 MB |
-| `infra-db` | `postgres:16-alpine` | — | 128 MB |
 | `prometheus` | `prom/prometheus:v2.53.0` | 127.0.0.1:9090 | 256 MB |
 | `grafana` | `grafana/grafana-oss:11.6.0` | 127.0.0.1:3030 | 128 MB |
+
+### RDS (fuera de los nodos, en la misma VPC)
+
+| Dato | Valor |
+|---|---|
+| Identificador | `discordia-db-cluster` (ya existía; es el del monolito) |
+| Motor / clase | Postgres 18 / `db.t4g.micro`, una sola zona (sin Multi-AZ) |
+| Usuario | `discordia_admin` (el maestro), el mismo para las cuatro bases |
+| Red | DB subnet group `discordia-data` (subnets privadas en `us-east-1a` / `use1-az1` y `us-east-1f`, donde vive el RDS), Security Group `discordia-rds`, sin IP pública |
+| TLS | Obligatorio (`rds.force_ssl = 1`, default de Postgres 18) |
+
+### Solo en local (profile `local`)
+
+| Servicio | Para qué |
+|---|---|
+| `chat-mongo` | Hace de Atlas |
+| `local-postgres` (`postgres:18-alpine`) | Hace de RDS: se publica en el 5432 del host y crea las cuatro bases con `init-dbs.sql` |
 
 ### En los tres nodos
 
@@ -168,28 +181,37 @@ flowchart TB
     INET((Internet))
     CFP[Cloudflare<br/>rangos IPv4]
 
-    subgraph VPC_E[VPC edge 10.10.0.0/16]
-        E[EC2 edge<br/>10.10.1.10]
-    end
-    subgraph VPC_R[VPC realtime 10.20.0.0/16]
-        R[EC2 realtime<br/>10.20.1.10]
-    end
-    subgraph VPC_I[VPC infra 10.30.0.0/16]
-        I[EC2 infra<br/>10.30.1.10]
+    subgraph VPC[VPC 10.0.0.0/16 · Internet Gateway, sin NAT]
+        subgraph PUB[Subnet pública 10.0.1.0/24 · use1-az1]
+            E[EC2 edge 10.0.1.10<br/>SG discordia-edge]
+            R[EC2 realtime 10.0.1.20<br/>SG discordia-realtime]
+            I[EC2 infra 10.0.1.30<br/>SG discordia-infra]
+        end
+        subgraph DATA[Subnets de datos sin ruta a internet<br/>10.0.64.0/24 us-east-1a · 10.0.66.0/24 us-east-1f]
+            DB[(RDS<br/>SG discordia-rds)]
+        end
     end
 
     CFP -->|443| E
     INET -->|7881 tcp · 7882 udp| R
-    VPC_E <-->|peering| VPC_R
-    VPC_E <-->|peering| VPC_I
-    VPC_R <-->|peering| VPC_I
+    E -->|3000 · 8082 · 3001 · 7880| R
+    E -->|8003| I
+    E & R -->|5672| I
+    R -->|8002| E
+    I -->|9100 · 9180| E & R
+    E & R & I -->|5432| DB
 ```
 
-- **Una VPC por nodo** con una subnet pública (`x.x.1.0/24`) e Internet Gateway. **Sin NAT Gateway**
-  (costaría ~$32/mes): cada EC2 sale a internet con su IP pública y el Security Group bloquea la entrada.
-- **VPC peering** entre las tres VPCs (no es transitivo, por eso son tres conexiones). El tráfico entre
-  nodos va por la red privada de AWS. Los tres nodos están en la misma zona física (`availability_zone_id
-  = use1-az1`), así que no se paga transferencia entre zonas.
+- **Una VPC** con una subnet pública (`10.0.1.0/24`) para las tres EC2 y dos subnets de datos
+  (`10.0.64.0/24` en `us-east-1a`, `10.0.66.0/24` en `us-east-1f`) para el RDS. Las de datos no tienen ruta
+  a internet; son dos porque AWS exige que un DB subnet group cubra al menos dos zonas. La de `us-east-1f`
+  existe porque el RDS ya vivía en esa zona y al cambiarlo de VPC AWS no lo cambia de zona.
+- **Sin NAT Gateway** (por un tema de costos mayormente): cada EC2 sale a internet con su IP pública y el Security Group
+  bloquea la entrada.
+- **El aislamiento lo dan los Security Groups, no la red**: cada nodo tiene el suyo y las reglas entre
+  nodos apuntan al **grupo de origen** ("el RDS acepta 5432 del grupo de edge"), no a rangos de IP. Separar
+  en VPCs no agregaba seguridad: con peering, lo que pasa o no pasa lo deciden igual los Security Groups.
+- Las tres EC2 están en la misma zona (`us-east-1a` / `use1-az1`).
 - **Sin SSH ni puerto 22**: se entra por **SSM Session Manager**.
 - **IMDSv2 obligatorio**, disco cifrado, créditos de CPU en `standard` (si se agotan, la máquina se frena en
   vez de cobrar el excedente).
@@ -199,16 +221,17 @@ flowchart TB
 Todo lo que no está en esta tabla está cerrado. El Admin API de Kong (8001), el panel de RabbitMQ,
 Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se accede con port forwarding de SSM).
 
-| Nodo | Puerto | Desde | Para qué |
+| Security Group | Puerto | Desde | Para qué |
 |---|---|---|---|
-| edge | 443/tcp | Rangos de Cloudflare | Kong (API y WebSockets) |
-| edge | 8002/tcp | VPC realtime | `can-send` / `can-connect` de Server-Roles (**temporal**) |
-| realtime | 3000, 8082, 3001/tcp | VPC edge | Kong → Chat, Voice, Notification |
-| realtime | 7880/tcp | VPC edge | Kong → señalización de LiveKit (`/livekit`) |
-| realtime | 7881/tcp, 7882/udp | 0.0.0.0/0 | Audio WebRTC (LiveKit valida su propio token) |
-| infra | 5672/tcp | VPC edge y realtime | RabbitMQ (workers de outbox y consumidores) |
-| infra | 8003/tcp | VPC edge | Kong → Payments |
-| edge, realtime | 9100, 9180/tcp | VPC infra | Prometheus → Node Exporter y cAdvisor |
+| `discordia-edge` | 443/tcp | Rangos de Cloudflare | Kong (API y WebSockets) |
+| `discordia-edge` | 8002/tcp | grupo realtime | `can-send` / `can-connect` de Server-Roles (**temporal**) |
+| `discordia-realtime` | 3000, 8082, 3001/tcp | grupo edge | Kong → Chat, Voice, Notification |
+| `discordia-realtime` | 7880/tcp | grupo edge | Kong → señalización de LiveKit (`/livekit`) |
+| `discordia-realtime` | 7881/tcp, 7882/udp | 0.0.0.0/0 | Audio WebRTC (LiveKit valida su propio token) |
+| `discordia-infra` | 5672/tcp | grupos edge y realtime | RabbitMQ (workers de outbox y consumidores) |
+| `discordia-infra` | 8003/tcp | grupo edge | Kong → Payments |
+| `discordia-edge`, `discordia-realtime` | 9100, 9180/tcp | grupo infra | Prometheus → Node Exporter y cAdvisor |
+| `discordia-rds` | 5432/tcp | grupos edge, realtime e infra | Auth, Server-Roles, Notification, Payments → RDS |
 
 ### Cloudflare
 
@@ -249,6 +272,7 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 | Voice | LiveKit | API de servidor | mismo nodo (`livekit:7880`) |
 | LiveKit | Voice `/webhooks/livekit` | Webhook HTTP | mismo nodo |
 | Prometheus | Exportadores de los 3 nodos | HTTP (scrape) | `<NODO>_HOST:9100/9180` |
+| Auth, Server-Roles, Notification, Payments | RDS | Postgres con TLS | `DB_HOST:5432` (endpoint del RDS, por la VPC) |
 | Chat | MongoDB Atlas | TLS | internet (allowlist: Elastic IP de realtime) |
 | Auth | Auth0 / Cloudinary | HTTPS | internet |
 
@@ -296,7 +320,7 @@ sequenceDiagram
     participant K as Kong
     participant CH as Chat (realtime)
     participant SR as Server-Roles (edge)
-    participant DB as edge-db
+    participant DB as RDS
     participant MQ as RabbitMQ (infra)
     participant M as Atlas
 
@@ -343,21 +367,29 @@ sequenceDiagram
 
 | Dato | Dónde | Detalle |
 |---|---|---|
-| `auth_db` | `edge-db` (edge) | Usuario `auth_user`. Base y usuario los crea `deploy/postgres-init/edge/01-databases.sh` |
-| `server_roles_db` | `edge-db` (edge) | Usuario `server_roles_user` (no puede leer `auth_db` ni al revés) |
-| `notification_db` | `realtime-db` (realtime) | Usuario `notification_user` |
-| `payments_db` | `infra-db` (infra) | Usuario `payments_user` |
+| `auth_db` | RDS | La usa Auth-User (edge) |
+| `server_roles_db` | RDS | La usa Server-Roles (edge) |
+| `notification_db` | RDS | La usa Notification (realtime) |
+| `payments_db` | RDS | La usa Payments (infra) |
 | Historial del chat | MongoDB Atlas M0 | En local, `chat-mongo` (profile `local`) |
 | Sesiones de voz, presencia | `voice-redis` (realtime) | Local al nodo |
 | Pub/sub del chat | `chat-redis` (realtime) | `noeviction` |
 | Rate limiting | `gateway-redis` (edge) | `allkeys-lru` |
 | Eventos | RabbitMQ (infra) | Volumen persistente `rabbitmq-data` |
 
-**Cada nodo depende solo de su propia base**: si se cae infra, Auth y Server-Roles siguen funcionando.
+- **Una base por servicio, en una sola instancia**: ningún servicio lee la base de otro (se hablan por
+  eventos).
+- **Un solo usuario** (`discordia_admin`) para las cuatro. 
+- **TLS**: Postgres 18 en RDS lo exige. Los servicios Python (asyncpg, psycopg2) lo negocian solos; el de
+  Node (Notification) necesita `sslmode=no-verify` en la URL (`NOTIFICATION_DB_SSLMODE`): cifra pero no valida
+  el certificado, porque Node no trae la CA de Amazon. CHEQUEAR SI hay que: montar el bundle de la CA de RDS y
+  usar `verify-full`.
+- **Backups**: los automáticos del RDS (snapshots diarios y restauración a un punto en el tiempo).
+- En local, `local-postgres` (profile `local`) hace de RDS con las mismas bases (`init-dbs.sql`).
 
-**Importante:** Postgres, RabbitMQ y Grafana toman usuario y contraseña **solo la primera vez que arrancan**
-(con el volumen vacío). Si después se cambia el valor en `nodes.env`, hay que cambiarlo también adentro
-(`ALTER USER`, `rabbitmqctl change_password`, etc.). Ver sección 15.
+**Importante:** RabbitMQ y Grafana toman usuario y contraseña **solo la primera vez que arrancan** (con el
+volumen vacío). Si después se cambia el valor en `nodes.env`, hay que cambiarlo también adentro
+(`rabbitmqctl change_password`, etc.). Ver sección 15.
 
 ---
 
@@ -406,6 +438,11 @@ sequenceDiagram
 | **infra** | Login, servidores, canales, chat y voz | Payments; eventos en vivo (bans y mutes se aplican al volver: quedan en la cola o en el outbox); métricas |
 | **realtime** | Login, servidores, canales, roles, Payments | Chat, voz, notificaciones |
 | **edge** | Nada desde afuera (es la única entrada) | Toda la API. Los WebSockets abiertos se cortan |
+| **RDS** | Chat ya abierto (mensajes en Atlas) y voz ya conectada | Login, servidores, canales, permisos (nuevos WebSockets y joins de voz fallan en `can-send` / `can-connect`), notificaciones y Payments |
+
+**El RDS es el punto único de falla de los datos relacionales.** Se aceptó a cambio de no administrar
+Postgres en tres máquinas: AWS se ocupa de parches, backups y de reemplazar el hardware. Multi-AZ lo
+resolvería, pero duplica el costo del RDS.
 
 Mecanismos:
 
@@ -414,7 +451,7 @@ Mecanismos:
 - **Consumidor del chat**: no bloquea el arranque, reintenta para siempre con backoff (1 s → 30 s) y se
   reconecta si RabbitMQ se cae. `/readyz` del chat informa `rabbitmq: ok | disconnected` **sin** marcarse
   no-ready (para no propagar una caída de infra).
-- **Outbox**: si RabbitMQ no está, los eventos esperan en la base del productor.
+- **Outbox**: si RabbitMQ no está, los eventos esperan en la base del productor (en el RDS).
 - **Voice → Server-Roles**: timeout de 2 s y 3 intentos; si no responde, el join da 503 (ADR-03 de Voice).
 - **`restart: unless-stopped`** y healthchecks en todos los contenedores.
 
@@ -460,7 +497,7 @@ flowchart LR
   `voice-signaling-service`, `notification-service`, `payments-service`.
 - La SPA no usa imagen: la publica Cloudflare Pages.
 
-### Un compose, tres nodos
+### Un compose, tres nodos CHEQUEAR !!!
 
 `deploy/docker-compose.yml` define los tres nodos. Qué se levanta lo decide `COMPOSE_PROFILES`:
 
@@ -476,7 +513,7 @@ Archivos:
 | `deploy/docker-compose.yml` | Servicios, redes por nodo, límites, healthchecks |
 | `deploy/.env.example` | Variables: local y la lista completa de producción por nodo |
 | `deploy/gateway.env.example` | Solo edge: TLS e IPs de confianza de Cloudflare |
-| `deploy/postgres-init/edge/01-databases.sh` | Crea `auth_db` y `server_roles_db` con su usuario |
+| `init-dbs.sql` (raíz) | Solo local: crea las cuatro bases en `local-postgres` |
 | `deploy/observability/prometheus.yml.tmpl` | Destinos de Prometheus |
 | `infra/terraform/` | Infraestructura (ver abajo) |
 
@@ -484,7 +521,8 @@ Archivos:
 
 - Código: `/opt/discordia` (clon del orquestador + submódulo `observability`).
 - Variables y secretos: `/etc/discordia/nodes.env` (permisos 600), con `COMPOSE_PROFILES`, `REGISTRY`, un
-  `<SERVICIO>_TAG` por servicio, `EDGE_HOST` / `REALTIME_HOST` / `INFRA_HOST` y los secretos del nodo.
+  `<SERVICIO>_TAG` por servicio, `EDGE_HOST` / `REALTIME_HOST` / `INFRA_HOST`, el RDS (`DB_HOST`,
+  `DB_USER`, `DB_PASSWORD`; en realtime también `NOTIFICATION_DB_SSLMODE=no-verify`) y los secretos del nodo.
   Generar los secretos con `openssl rand -hex 32` (no `-base64`: sus `/ + =` rompen las URLs).
 - Atajo para Compose: `/usr/local/bin/dcn` (no `dc`, que es una calculadora del sistema):
 
@@ -502,20 +540,26 @@ exec docker compose -f /opt/discordia/deploy/docker-compose.yml --env-file /etc/
 
 ```
 infra/terraform/
-├── main.tf          3 nodos + 3 peerings + registro DNS api
+├── network.tf       VPC, Internet Gateway, subnet pública, subnets de datos, DB subnet group
+├── security.tf      Security Group por nodo + RDS, y todas las reglas de entrada
+├── main.tf          los 3 nodos, lectura del RDS (data source), budget, registro DNS api
 ├── pages.tf         proyecto de Cloudflare Pages + dominio app + CNAME
-├── providers.tf     un provider de AWS por nodo (aws.edge / realtime / infra) + Cloudflare
+├── providers.tf     AWS (un perfil) + Cloudflare
 ├── variables.tf · locals.tf · outputs.tf · versions.tf
 └── modules/
-    ├── node/        VPC, subnet, IGW, Security Group, EC2, Elastic IP, rol SSM, budget, cloud-init
-    └── peering/     peering entre dos cuentas (o la misma) + rutas
+    └── node/        EC2, Elastic IP, rol SSM, cloud-init
 ```
+
+- **El RDS no lo crea ni lo borra Terraform**: lo lee con un `data "aws_db_instance"` (para el endpoint) y
+  crea el subnet group y el Security Group adonde se lo mueve. Moverlo es un comando aparte
+  (`terraform output -raw rds_move_command`), así ningún `terraform destroy` puede borrar la base.
 
 - **Estado local** (`terraform.tfstate`, no se commitea): tiene que aplicarlo una sola persona y guardar
   una copia. Alternativa: HCP Terraform (bloque `cloud` comentado en `versions.tf`).
 - `manage_dns = false` hasta el corte: recién ahí Terraform administra `api` y `app`.
-- Cada cuenta tiene un **budget de $1 sobre el gasto neto** (avisa si algo se cobra fuera de los créditos).
-- `terraform output`: IPs de cada nodo, comandos de SSM y `cloudflare_trusted_ips`.
+- Un **budget de $1 sobre el gasto neto** (avisa si algo se cobra fuera de los créditos).
+- `terraform output`: IPs de cada nodo, comandos de SSM, `rds_endpoint`, `rds_move_command` y
+  `cloudflare_trusted_ips`.
 
 ### Local (simular los tres nodos)
 
@@ -527,30 +571,13 @@ curl -i localhost:8000/livez
 
 ---
 
-## 12. Costos
-
-Todo se paga con los créditos del plan Free de AWS (aprox., us-east-1):
-
-| Recurso | Por mes |
-|---|---|
-| 3 × EC2 `t3.micro` | ~$23 |
-| 3 IPv4 públicas (2 Elastic IP + 1 automática) | ~$11 |
-| 3 × 20 GB gp3 | ~$5 |
-| Peering, transferencia en la misma zona | $0 |
-| Cloudflare (DNS, proxy, Pages), Atlas M0, GHCR, Auth0 | $0 |
-| **Total** | **~$39/mes en créditos** |
-
-Al terminarse los créditos o los 6 meses del plan Free, AWS suspende la cuenta: verificar la fecha contra la
-entrega. Después del corte hay que **borrar el RDS y la EC2 del monolito** (si no, siguen cobrando).
-
----
-
-## 13. Decisiones y alternativas descartadas
+## 12. Decisiones y alternativas descartadas
 
 | Decisión | En lugar de | Por qué |
 |---|---|---|
-| Postgres en contenedor por nodo | RDS compartido o uno por servicio | $0 extra y cada nodo depende solo de su base. Contra: backups propios |
-| VPC por nodo + peering | Una VPC | Permite usar una cuenta de AWS por nodo; el peering es gratis |
+| Un RDS con una base por servicio | Postgres en contenedor por nodo; un RDS por servicio | Uno por servicio cuadruplicaría el costo. Contra: punto único de falla (sección 9) |
+| Una VPC con un Security Group por nodo | Una VPC por nodo + peering | Los tres nodos están en la misma cuenta, así que las VPCs separadas solo sumaban peerings y rutas. El aislamiento entre nodos lo dan los Security Groups igual |
+| RDS movido a la VPC de los nodos | Dejarlo en su VPC + peering | Sin peering ni rutas; la base queda en subnets sin salida a internet y solo la ven los tres nodos |
 | Cloudflare Pages | Vercel | Vercel desaconseja un proxy adelante; Pages convive con la nube naranja |
 | Cloudflare proxy en `api` | DNS directo / Vercel rewrites | Oculta la IP, TLS gratis, anti-DDoS. Vercel no soporta WebSockets hacia afuera |
 | Compose por nodo + imágenes en GHCR | systemd por contenedor, ECS | Mismo archivo en local y producción; despliegue por servicio con `--no-deps` |
@@ -560,42 +587,51 @@ entrega. Después del corte hay que **borrar el RDS y la EC2 del monolito** (si 
 
 ---
 
-## 14. Estado actual y pasos que faltan
+## 13. Estado actual y pasos que faltan
 
 ### Estado de los nodos
 
 | Nodo | Estado |
 |---|---|
-| infra | **Arriba.** RabbitMQ, Prometheus y Grafana OK. Payments: verificar `/readyz` con la imagen nueva (SQLAlchemy fijo) o con la URL `postgresql+psycopg2://` |
-| realtime | **Arriba.** Mongo (Atlas) y Redis OK. RabbitMQ: verificar `"rabbitmq":"ok"` después de alinear la contraseña |
-| edge | **No levanta todavía.** Auth y Server-Roles fallan porque `edge-db` no creó sus usuarios: el script de inicio no estaba en el repo (lo ocultaba `deploy/.gitignore`). Ya corregido en local, falta commitear y recrear la base (ver abajo) |
+| infra | Estuvo arriba en el diseño viejo (3 VPCs, Postgres local). Se recrea con el nuevo Terraform |
+| realtime | Estuvo arriba en el diseño viejo (Atlas, Redis y RabbitMQ OK). Se recrea con el nuevo Terraform |
+| edge | **Nunca levantó**: Auth y Server-Roles no encontraban sus usuarios en el Postgres local. Se resuelve con el RDS (ya tiene las bases y el usuario) |
+
+El código para la VPC única y el RDS está escrito (Terraform, compose, `.env.example`); falta aplicarlo.
+Aplicar el Terraform **reemplaza las tres EC2** (cambian de VPC y de IP privada); las Elastic IPs de edge y
+realtime se conservan.
 
 ### Pasos que faltan
 
-**1. Terminar de levantar los nodos**
+**1. VPC única + RDS y levantar los nodos**
 
-- [ ] Commitear y mergear a `develop` (orquestador): `deploy/.gitignore`, `deploy/postgres-init/edge/01-databases.sh`,
-      `deploy/.env.example`, URL `postgresql+psycopg2://` de Payments en los dos compose, puntero de Chat-Engine,
-      `.gitignore` de la raíz.
-- [ ] **Edge**: crear el script a mano en el nodo (o `git pull` después del merge), `dcn down`,
-      `docker volume rm discordia-nodes_edge-db-data`, `dcn up -d --no-build`. Verificar que Auth y
-      Server-Roles quedan `healthy` y que `curl -sk https://localhost/livez` da 200.
+- [ ] Commitear y mergear a `develop` (orquestador): Terraform, `deploy/docker-compose.yml`,
+      `deploy/.env.example`, `deploy/README.md`, este documento.
+- [ ] Guardar una copia de `/etc/discordia/nodes.env` de cada nodo (las EC2 se reemplazan).
+- [ ] `terraform.tfvars`: `aws_profile = "discordia-edge"` en vez del mapa `aws_profiles`.
+- [ ] `terraform plan` / `apply`: crea la VPC nueva y las EC2, borra las VPCs viejas y los peerings.
+- [ ] Mover el RDS: `$(terraform output -raw rds_move_command)` (desde ese momento el monolito se queda sin base).
+- [ ] Sacar los providers temporales `aws.edge/realtime/infra` de `providers.tf` y verificar `terraform plan` sin cambios.
+- [ ] En cada nodo: clonar, `nodes.env` con las IPs nuevas y `DB_*`, `docker login ghcr.io`, `dcn`, levantar
+      (infra → realtime → edge). Verificar `healthy` en Auth, Server-Roles, Notification y Payments.
 - [ ] Edge: `deploy/gateway.env` (TLS + `KONG_TRUSTED_IPS`) y el Origin Certificate en `deploy/tls/`.
 - [ ] Verificar `"rabbitmq":"ok"` en `/readyz` del chat y que los workers de outbox de edge conectan.
 - [ ] Verificar en Prometheus (*Status → Targets*) que los tres nodos aparecen *UP*.
 - [ ] Payments: `/readyz` en `ready` (imagen nueva con SQLAlchemy 2.0).
 
+YA ESTA
+
 **2. Corte (ventana de mantenimiento)**
 
 - [ ] Frenar el monolito.
-- [ ] `pg_dump` de `auth_db`, `server_roles_db`, `notification_db` y `payments_db` desde el RDS y restaurar
-      cada una en el Postgres de su nodo (`pg_restore --no-owner --role=<usuario>`).
-- [ ] `mongodump` del Mongo del monolito y `mongorestore` en Atlas.
+- [ ] (Sin migración de datos: el RDS es el mismo y no hay datos que conservar.)
 - [ ] Cloudflare: borrar los registros viejos `api`, `app` y los de Porkbun (`*`, `www`, raíz).
 - [ ] `manage_dns = true` y `terraform apply` (crea `api` → edge y `app` → Pages).
 - [ ] Cloudflare: SSL/TLS **Full (strict)** y **Always Use HTTPS**.
 - [ ] Auth0: `https://app.discordia.lol` en Callback URLs, Logout URLs y Web Origins.
 - [ ] Verificar: `curl -I https://api.discordia.lol/livez` → 200 y la IP de edge directa → timeout.
+
+YA ESTA (creo)
 
 **3. Validación de punta a punta**
 
@@ -608,8 +644,8 @@ entrega. Después del corte hay que **borrar el RDS y la EC2 del monolito** (si 
 
 **4. Cierre**
 
-- [ ] Después de unos días estables: snapshot y borrado del **RDS**, `terraform destroy` en `terraform/`
-      (EC2 del monolito) y borrar la VPC vieja.
+- [ ] Después de unos días estables: `terraform destroy` en `terraform/` (EC2 del monolito) y borrar su VPC
+      vieja (`vpc-085838c0959ba944c`, cuando ya no tenga el RDS ni nada adentro). El RDS **no** se borra.
 - [ ] Revisar que no queden budgets con alertas.
 
 **5. Pendientes de código y operación**
@@ -621,7 +657,8 @@ entrega. Después del corte hay que **borrar el RDS y la EC2 del monolito** (si 
 - [ ] Voice: consumir `member.banned` / `member.kicked` para sacar al usuario de la llamada.
 - [ ] Foto de permisos por eventos para eliminar `can-send` / `can-connect` y cerrar el puerto 8002.
 - [ ] Server-Roles: los íconos de servidor no se guardan (TODO de storage).
-- [ ] Backups: `pg_dump` periódico de cada nodo (a S3) y `mongodump` de Atlas (M0 no tiene backups).
+- [ ] Backups: verificar la retención de backups automáticos del RDS y `mongodump` de Atlas (M0 no tiene backups).
+- [ ] RDS: un usuario por servicio (permisos solo sobre su base) y TLS con `verify-full` en Notification.
 - [ ] Compose de la raíz: usar `postgres` por defecto en vez de `RDS_HOST` (hoy el `.env.example` trae el RDS).
 - [ ] Fijar versiones de dependencias en todos los repos (un `sqlalchemy` sin fijar rompió Payments).
 - [ ] Mobile: sacar `usesCleartextTraffic` cuando todo vaya por HTTPS.
@@ -630,20 +667,3 @@ entrega. Después del corte hay que **borrar el RDS y la EC2 del monolito** (si 
 - [ ] Evaluar `t3.small` para realtime si LiveKit se queda sin memoria o CPU en la micro.
 
 ---
-
-## 15. Problemas conocidos y cómo se resolvieron
-
-| Síntoma | Causa | Solución |
-|---|---|---|
-| Kong no arranca: "quedaron variables sin completar" | El chequeo de `render-config.sh` leía el comentario de `kong.yml` | El chequeo ignora líneas de comentario |
-| 502 en local con el compose de la raíz | `DATABASE_HOST=${RDS_HOST}` apuntaba al RDS real | `RDS_HOST=postgres` en el `.env` |
-| Payments: `No module named 'psycopg'` | `sqlalchemy` sin versión: la 2.1 usa psycopg 3 por defecto | `sqlalchemy>=2.0,<2.1` y URL `postgresql+psycopg2://` |
-| Chat: `rabbitmq: disconnected` (`ACCESS_REFUSED`) | RabbitMQ guardó otra contraseña en su primer arranque | `rabbitmqctl change_password` con la de `nodes.env` |
-| Edge: `password authentication failed` / `role does not exist` | El script de `edge-db` no estaba en el repo (`.gitignore`) | Patrones anclados (`/edge/`) y recrear el volumen |
-| `dc: stack empty` en el nodo | `dc` es una calculadora del sistema | El atajo se llama `dcn` |
-| Comandos con `#` fallan en zsh | zsh no acepta comentarios en la terminal | Pegar los comandos sin comentarios o `setopt interactivecomments` |
-| CI de Chat sin imagen | Cobertura de ramas 83,9 % < 85 % | Tests del consumidor (defaults, amqplib real, stop) |
-| CI de Auth/Server-Roles: bandit B108 | Ruta `/tmp` del heartbeat del worker | `# nosec B108` |
-| Gateway mergeado a `main` por error | Base del PR equivocada | Mergear la misma rama a `develop`; default branch = `develop` |
-| Imágenes de GHCR `unauthorized` | Paquetes privados | Hacerlos públicos o `docker login ghcr.io` con `read:packages` |
-| Secretos con `/ + =` rompen conexiones | Contraseñas base64 dentro de URLs | `openssl rand -hex 32` |
