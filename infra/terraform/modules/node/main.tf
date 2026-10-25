@@ -66,9 +66,8 @@ resource "aws_instance" "node" {
 
   # IMDSv2 obligatorio: evita que un SSRF en algún servicio lea las credenciales del rol de la instancia
   metadata_options {
-    http_tokens                 = "required"
-    http_endpoint               = "enabled"
-    http_put_response_hop_limit = var.imds_hop_limit
+    http_tokens   = "required"
+    http_endpoint = "enabled"
   }
 
   # Una AMI nueva o un cambio en el script de arranque no deben recrear la máquina (y perder sus datos)

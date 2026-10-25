@@ -32,9 +32,17 @@ output "cloudflare_trusted_ips" {
 }
 
 output "media_bucket" {
-  description = "S3_BUCKET y S3_PUBLIC_BASE_URL del nodo edge (Auth y Server-Roles)"
+  description = "S3_BUCKET y S3_PUBLIC_BASE_URL de Auth y Server-Roles"
   value = {
     name            = aws_s3_bucket.media.bucket
     public_base_url = "https://${aws_s3_bucket.media.bucket_regional_domain_name}"
+  }
+}
+
+output "media_access_key_commands" {
+  description = "Crear las access keys de cada servicio (una vez, o para rotarlas). Van al nodes.env del nodo donde corra cada servicio"
+  value = {
+    for service, user in aws_iam_user.media :
+    service => "aws iam create-access-key --profile ${var.aws_profile} --user-name ${user.name}"
   }
 }

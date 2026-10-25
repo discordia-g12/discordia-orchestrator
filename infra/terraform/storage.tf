@@ -1,7 +1,8 @@
 # Imágenes de usuario (avatares e íconos de servidor) en S3.
 #   avatars/       → Auth-User-Service
 #   server-icons/  → Server-Roles-Core-Service
-# Los dos servicios corren en el nodo edge y escriben con el rol de la instancia (sin access keys).
+# Cada servicio escribe con su propio usuario IAM, que solo puede tocar su prefijo: no depende del rol ni
+# de la metadata de la EC2 donde corre, así que puede moverse a cualquier nodo (o fuera de AWS) sin cambios.
 # La lectura es pública solo en esos dos prefijos: el resto del bucket queda privado.
 
 resource "aws_s3_bucket" "media" {
@@ -45,17 +46,26 @@ resource "aws_s3_bucket_policy" "media_public_read" {
   depends_on = [aws_s3_bucket_public_access_block.media]
 }
 
-# El rol del nodo edge puede escribir y borrar solo en los prefijos de imágenes
-resource "aws_iam_role_policy" "edge_media" {
-  name = "discordia-edge-media"
-  role = module.edge.role_name
+# Un usuario por servicio, con permiso de escribir y borrar solo en su prefijo.
+# Las access keys NO se crean acá (quedarían en texto plano en el estado): ver output media_access_key_commands.
+resource "aws_iam_user" "media" {
+  for_each = local.media_writers
+
+  name = "discordia-${each.key}-media"
+}
+
+resource "aws_iam_user_policy" "media" {
+  for_each = local.media_writers
+
+  name = "write-${each.value}"
+  user = aws_iam_user.media[each.key].name
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
       Effect   = "Allow"
       Action   = ["s3:PutObject", "s3:DeleteObject"]
-      Resource = [for prefix in local.media_prefixes : "${aws_s3_bucket.media.arn}/${prefix}/*"]
+      Resource = "${aws_s3_bucket.media.arn}/${each.value}/*"
     }]
   })
 }

@@ -16,7 +16,6 @@ module "edge" {
   instance_type     = var.instance_type
   root_volume_gb    = var.root_volume_gb
   elastic_ip        = true # api.discordia.lol apunta acá
-  imds_hop_limit    = 2    # Auth y Server-Roles leen el rol (S3) desde Docker: necesitan un salto más
 }
 
 module "realtime" {

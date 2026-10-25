@@ -113,10 +113,12 @@ services:
       AUTH0_DOMAIN: ${AUTH0_DOMAIN:-dev-dppme5iaqg60gkmo.us.auth0.com}
       AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-f2H8PhlKDl3KSIm64G5mHAeQih7iFyIP}
       AUTH0_DB_CONNECTION: Username-Password-Authentication
-      # Imágenes en S3: las credenciales salen del rol de la instancia edge (sin access keys)
+      # Imágenes en S3 con el usuario IAM propio del servicio (no usa el rol de la EC2: anda en cualquier nodo)
       AWS_REGION: ${AWS_REGION:-us-east-1}
       S3_BUCKET: ${S3_BUCKET:-}
       S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-}
+      AWS_ACCESS_KEY_ID: ${AUTH_AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AUTH_AWS_SECRET_ACCESS_KEY:-}
       RABBITMQ_HOST: ${INFRA_HOST:-host.docker.internal}
       RABBITMQ_PORT: "5672"
       RABBITMQ_USER: ${RABBITMQ_USER:-admin}
@@ -183,10 +185,12 @@ services:
       DATABASE_NAME: server_roles_db
       DATABASE_USER: ${DB_USER:-postgres}
       DATABASE_PASSWORD: ${DB_PASSWORD:-dev-postgres}
-      # Imágenes en S3: las credenciales salen del rol de la instancia edge (sin access keys)
+      # Imágenes en S3 con el usuario IAM propio del servicio (no usa el rol de la EC2: anda en cualquier nodo)
       AWS_REGION: ${AWS_REGION:-us-east-1}
       S3_BUCKET: ${S3_BUCKET:-}
       S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-}
+      AWS_ACCESS_KEY_ID: ${SERVER_ROLES_AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${SERVER_ROLES_AWS_SECRET_ACCESS_KEY:-}
       RABBITMQ_HOST: ${INFRA_HOST:-host.docker.internal}
       RABBITMQ_PORT: "5672"
       RABBITMQ_USER: ${RABBITMQ_USER:-admin}

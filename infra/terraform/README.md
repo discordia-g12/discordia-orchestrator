@@ -23,10 +23,16 @@ El frontend (SPA) va en **Cloudflare Pages** (`pages.tf`).
   `discordia-data` y Security Group `discordia-rds`) y solo lee su endpoint (`terraform output rds_endpoint`).
   Así un error en el código nunca puede borrar la base.
 - **Imágenes en S3** (`storage.tf`): bucket `discordia-g12-media`, lectura pública solo en `avatars/` y
-  `server-icons/`, escritura solo para el rol del nodo edge (Auth y Server-Roles, sin access keys). Edge tiene
-  `imds_hop_limit = 2` para que los contenedores lleguen a las credenciales del rol. Después del `apply`,
-  cargar `S3_BUCKET` y `S3_PUBLIC_BASE_URL` (`terraform output media_bucket`) en el `nodes.env` de edge. Si
-  falla la bucket policy con `AccessDenied`, revisar que el *Block Public Access* de la cuenta no esté
+  `server-icons/`. Cada servicio escribe con su propio usuario IAM (`discordia-auth-media`,
+  `discordia-server-roles-media`), limitado a su prefijo: no usa el rol de la EC2, así que funciona en
+  cualquier nodo. Después del `apply`:
+  1. Crear las access keys con los comandos de `terraform output media_access_key_commands` (no se crean
+     en Terraform para que el secreto no quede en el estado).
+  2. Cargar en el `nodes.env` del nodo de cada servicio `S3_BUCKET` y `S3_PUBLIC_BASE_URL`
+     (`terraform output media_bucket`) y sus claves: `AUTH_AWS_ACCESS_KEY_ID` / `AUTH_AWS_SECRET_ACCESS_KEY`
+     y `SERVER_ROLES_AWS_ACCESS_KEY_ID` / `SERVER_ROLES_AWS_SECRET_ACCESS_KEY`.
+
+  Si falla la bucket policy con `AccessDenied`, revisar que el *Block Public Access* de la cuenta no esté
   activo (S3 → Block Public Access settings for this account).
 - **Budget de $1 sobre el gasto neto**: si llega un mail, algo se está cobrando fuera de los créditos.
 
