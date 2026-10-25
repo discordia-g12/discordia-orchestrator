@@ -36,7 +36,7 @@ resource "cloudflare_pages_project" "webapp" {
     production {
       # Vite las embebe en el bundle al compilar: son valores públicos, no secretos
       environment_variables = {
-        NODE_VERSION         = "20" # misma versión que el Dockerfile del repo
+        NODE_VERSION         = "22" # misma versión que el .nvmrc, el CI y el Dockerfile del repo (Expo SDK 58 pide 22)
         VITE_API_URL         = var.api_public_url
         VITE_AUTH0_DOMAIN    = var.auth0_domain
         VITE_AUTH0_CLIENT_ID = var.auth0_client_id
