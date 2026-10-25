@@ -31,3 +31,4 @@ variable "elastic_ip" {
   type        = bool
   default     = false
 }
+

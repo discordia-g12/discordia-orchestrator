@@ -274,7 +274,7 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 | Prometheus | Exportadores de los 3 nodos | HTTP (scrape) | `<NODO>_HOST:9100/9180` |
 | Auth, Server-Roles, Notification, Payments | RDS | Postgres con TLS | `DB_HOST:5432` (endpoint del RDS, por la VPC) |
 | Chat | MongoDB Atlas | TLS | internet (allowlist: Elastic IP de realtime) |
-| Auth | Auth0 / Cloudinary | HTTPS | internet |
+| Auth, Server-Roles | Auth0 (Auth) / S3 (avatares e íconos) | HTTPS | internet |
 
 ### Pedido a la API
 

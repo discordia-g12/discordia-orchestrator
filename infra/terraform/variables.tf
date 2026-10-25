@@ -42,6 +42,12 @@ variable "root_volume_gb" {
   default     = 20
 }
 
+variable "media_bucket_name" {
+  description = "Bucket de avatares e íconos de servidor (el nombre es global en todo S3)"
+  type        = string
+  default     = "discordia-g12-media"
+}
+
 variable "budget_alert_email" {
   description = "Mail que recibe el aviso si alguna cuenta empieza a gastar plata real (pasados los créditos)"
   type        = string

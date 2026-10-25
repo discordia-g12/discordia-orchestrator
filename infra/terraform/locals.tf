@@ -18,6 +18,13 @@ locals {
     infra    = "10.0.1.30"
   }
 
+  # Bucket de imágenes (storage.tf): qué servicio escribe en qué prefijo. Todos los prefijos son públicos.
+  media_writers = {
+    auth         = "avatars"
+    server-roles = "server-icons"
+  }
+  media_prefixes = values(local.media_writers)
+
   # Solo Cloudflare puede llegarle a Kong (el origen no queda expuesto a internet)
   cloudflare_ipv4 = data.cloudflare_ip_ranges.current.ipv4_cidr_blocks
 }
