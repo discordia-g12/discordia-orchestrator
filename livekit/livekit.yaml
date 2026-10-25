@@ -1,0 +1,24 @@
+# Configuración del servidor LiveKit (SFU de voz) para desarrollo local.
+# Las API keys NO van acá: se pasan por la variable LIVEKIT_KEYS desde docker-compose.yml,
+# para que siempre coincidan con las que usa voice-signaling-service.
+
+port: 7880              # API HTTP + señalización WebSocket (clientes y SDK server)
+bind_addresses:
+  - 0.0.0.0
+
+rtc:
+  tcp_port: 7881        # Fallback de media por TCP
+  udp_port: 7882        # Media WebRTC por UDP (un único puerto multiplexado)
+  # En local no queremos que descubra la IP pública vía STUN; la IP anunciada
+  # a los clientes se fija con NODE_IP en docker-compose.yml.
+  use_external_ip: false
+
+logging:
+  level: info
+
+# Avisa a voice-signaling-service cuando alguien entra o sale de una sala, para limpiar su sesión
+# aunque no haya llamado a /leave (cerró la pestaña, se quedó sin red). La api_key con la que se
+# firman se pasa por LIVEKIT_WEBHOOK_API_KEY desde docker-compose.yml.
+webhook:
+  urls:
+    - http://voice-signaling-service:8080/webhooks/livekit

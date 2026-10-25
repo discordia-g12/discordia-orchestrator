@@ -1,0 +1,640 @@
+# Discordia en tres nodos, en un solo compose.
+#
+# Cada nodo tiene su propia red de Docker: sus contenedores se ven por nombre entre ellos, pero NO ven
+# los de otro nodo. Lo que cruza de un nodo a otro va como entre máquinas distintas: a la IP del host
+# y al puerto publicado.
+#   - Local (los tres en tu máquina): la "IP del host" es host.docker.internal.
+#   - Producción (una EC2 por nodo): la IP privada de cada nodo (terraform output nodes).
+#
+# Qué nodos se levantan lo decide COMPOSE_PROFILES (en el .env):
+#   local:      COMPOSE_PROFILES=edge,realtime,infra,local   (local = suma Mongo y un Postgres que hace de RDS)
+#   EC2 edge:   COMPOSE_PROFILES=edge
+#
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+# Secretos: los defaults de abajo son SOLO para local. En producción el .env del nodo los pisa todos
+# (ver .env.example).
+#
+# Imágenes: en local se construyen desde cada repo (build). En producción se bajan de GHCR, donde las
+# publica el CI de cada repo: REGISTRY=ghcr.io/discordia-g12 y un tag por servicio (<SERVICIO>_TAG) con
+# el SHA del commit de ese repo, porque cada servicio se despliega por separado.
+
+name: discordia-nodes
+
+x-cross-node: &cross-node
+  # Linux (EC2) no define host.docker.internal: se mapea a la IP del host. En Docker Desktop ya existe.
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+services:
+  # ======================================================================
+  # NODO 1 — EDGE: Kong, Auth (+worker), Server-Roles (+worker)
+  # ======================================================================
+  gateway:
+    profiles: ["edge"]
+    <<: *cross-node
+    image: ${REGISTRY:-discordia}/gateway:${GATEWAY_TAG:-local}
+    build: ../Gateway
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_HTTPS_PORT:-8443}:8443"           # Producción: 443, solo desde Cloudflare (Security Group)
+      - "127.0.0.1:${GATEWAY_HTTP_PORT:-8000}:8000"  # HTTP sin TLS: local / depuración en el host
+    environment:
+      - KONG_PROXY_LISTEN=0.0.0.0:8000, 0.0.0.0:8443 ssl http2
+      - KONG_ADMIN_LISTEN=127.0.0.1:8001             # El Admin API no sale del contenedor
+      - KONG_NGINX_WORKER_PROCESSES=1
+      - AUTH0_DOMAIN=${AUTH0_DOMAIN:-dev-dppme5iaqg60gkmo.us.auth0.com}
+      - AUTH0_AUDIENCE=${AUTH0_AUDIENCE:-https://api.discordia.com}
+      # Destinos (Gateway/render-config.sh): los del mismo nodo por nombre, los de otros nodos por IP:puerto
+      - AUTH_SERVICE_URL=http://auth-service:8000
+      - SERVER_ROLES_URL=http://server-roles-service:8080
+      - CHAT_ENGINE_URL=http://${REALTIME_HOST:-host.docker.internal}:3000
+      - VOICE_SIGNALING_URL=http://${REALTIME_HOST:-host.docker.internal}:8082
+      - NOTIFICATION_URL=http://${REALTIME_HOST:-host.docker.internal}:3001
+      - LIVEKIT_SIGNALING_URL=http://${REALTIME_HOST:-host.docker.internal}:7880
+      - PAYMENTS_URL=http://${INFRA_HOST:-host.docker.internal}:8003
+    env_file:
+      # Solo producción: Origin Certificate de Cloudflare e IPs de confianza (ver gateway.env.example).
+      # Sin este archivo Kong usa un certificado autofirmado propio, suficiente para local.
+      - path: ./gateway.env
+        required: false
+    volumes:
+      - ${TLS_DIR:-./tls}:/etc/kong/tls:ro
+    depends_on:
+      gateway-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+    networks: [edge]
+
+  gateway-redis:
+    profiles: ["edge"]
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Contadores de rate limit: si se llena, perder los más viejos es aceptable.
+    command: ["redis-server", "--maxmemory", "40mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: 64M
+    networks:
+      edge:
+        aliases:
+          - redis # nombre que usa kong.yml en los plugins de rate-limiting
+
+  auth-service:
+    profiles: ["edge"]
+    <<: *cross-node
+    image: ${REGISTRY:-discordia}/auth-service:${AUTH_SERVICE_TAG:-local}
+    build: ../Auth-User-Service
+    restart: unless-stopped
+    environment: &auth-env
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      # RDS (local: el Postgres de desarrollo del profile local, por host.docker.internal:5432)
+      DATABASE_HOST: ${DB_HOST:-host.docker.internal}
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: auth_db
+      DATABASE_USER: ${DB_USER:-postgres}
+      DATABASE_PASSWORD: ${DB_PASSWORD:-dev-postgres}
+      AUTH0_DOMAIN: ${AUTH0_DOMAIN:-dev-dppme5iaqg60gkmo.us.auth0.com}
+      AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-f2H8PhlKDl3KSIm64G5mHAeQih7iFyIP}
+      AUTH0_DB_CONNECTION: Username-Password-Authentication
+      # Imágenes en S3 con el usuario IAM propio del servicio (no usa el rol de la EC2: anda en cualquier nodo)
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-}
+      AWS_ACCESS_KEY_ID: ${AUTH_AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AUTH_AWS_SECRET_ACCESS_KEY:-}
+      RABBITMQ_HOST: ${INFRA_HOST:-host.docker.internal}
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: ${RABBITMQ_USER:-admin}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-admin}
+    depends_on:
+      local-postgres:
+        condition: service_healthy
+        required: false # solo existe con el profile local (en producción la base es el RDS)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+    networks: [edge]
+
+  auth-outbox-worker:
+    profiles: ["edge"]
+    <<: *cross-node
+    image: ${REGISTRY:-discordia}/auth-service:${AUTH_SERVICE_TAG:-local}
+    build: ../Auth-User-Service
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.outbox_publisher"]
+    environment: *auth-env
+    depends_on:
+      auth-service:
+        condition: service_healthy
+    # Sin HTTP: el worker toca /tmp/outbox-heartbeat en cada ciclo exitoso (incluye conectar a RabbitMQ)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(0 if time.time() - os.stat('/tmp/outbox-heartbeat').st_mtime < 30 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: 128M
+    networks: [edge]
+
+  server-roles-service:
+    profiles: ["edge"]
+    <<: *cross-node
+    image: ${REGISTRY:-discordia}/server-roles-service:${SERVER_ROLES_TAG:-local}
+    build: ../Server-Roles-Core-Service
+    restart: unless-stopped
+    # Sin --reload ni el código montado como volumen
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8080"
+    ports:
+      # Temporal: Chat y Voice (nodo realtime) consultan /internal/can-send y /internal/can-connect.
+      # En producción el Security Group solo lo abre al rango de la VPC realtime.
+      - "8002:8080"
+    environment: &server-roles-env
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      PYTHONPATH: /app
+      DATABASE_HOST: ${DB_HOST:-host.docker.internal}
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: server_roles_db
+      DATABASE_USER: ${DB_USER:-postgres}
+      DATABASE_PASSWORD: ${DB_PASSWORD:-dev-postgres}
+      # Imágenes en S3 con el usuario IAM propio del servicio (no usa el rol de la EC2: anda en cualquier nodo)
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-}
+      AWS_ACCESS_KEY_ID: ${SERVER_ROLES_AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${SERVER_ROLES_AWS_SECRET_ACCESS_KEY:-}
+      RABBITMQ_HOST: ${INFRA_HOST:-host.docker.internal}
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: ${RABBITMQ_USER:-admin}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-admin}
+    depends_on:
+      local-postgres:
+        condition: service_healthy
+        required: false # solo existe con el profile local
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s # margen para alembic upgrade head
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+    networks: [edge]
+
+  server-roles-outbox-worker:
+    profiles: ["edge"]
+    <<: *cross-node
+    image: ${REGISTRY:-discordia}/server-roles-service:${SERVER_ROLES_TAG:-local}
+    build: ../Server-Roles-Core-Service
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.outbox_publisher"]
+    environment: *server-roles-env
+    depends_on:
+      server-roles-service:
+        condition: service_healthy # ya corrió las migraciones (crea outbox_events)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(0 if time.time() - os.stat('/tmp/outbox-heartbeat').st_mtime < 30 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: 128M
+    networks: [edge]
+
+  # ======================================================================
+  # NODO 2 — REALTIME: Chat, Voice, LiveKit, Notification, Redis
+  # ======================================================================
+  chat-engine-service:
+    profiles: ["realtime"]
+    <<: *cross-node
+    image: ${REGISTRY:-discordia}/chat-engine-service:${CHAT_ENGINE_TAG:-local}
+    build: ../Chat-Engine-Service
+    restart: unless-stopped
+    ports:
+      - "3000:3000" # Kong (nodo edge)
+    environment:
+      - PORT=3000
+      # Local: Mongo en contenedor (profile local). Producción: MongoDB Atlas M0.
+      - MONGO_URI=${MONGO_URI:-mongodb://chat-mongo:27017/chat_db}
+      - REDIS_URL=redis://chat-redis:6379
+      # can-send contra Server-Roles (nodo edge) al abrir cada WebSocket; después la sesión se
+      # actualiza con los eventos member.* que llegan por RabbitMQ (nodo infra)
+      - CORE_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8002
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@${INFRA_HOST:-host.docker.internal}:5672/
+      - RABBITMQ_EXCHANGE=server.events
+      - NODE_OPTIONS=--max-old-space-size=192
+    depends_on:
+      chat-redis:
+        condition: service_healthy
+      chat-mongo:
+        condition: service_healthy
+        required: false # solo existe con el profile local
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/readyz > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 256M
+    networks: [realtime]
+
+  chat-redis:
+    profiles: ["realtime"]
+    image: redis:7-alpine
+    restart: unless-stopped
+    # noeviction: si se llena, Redis rechaza escrituras en vez de borrar datos de chat en silencio.
+    command: ["redis-server", "--maxmemory", "100mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - chat-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: 160M
+    networks: [realtime]
+
+  # Solo local: en producción el historial está en MongoDB Atlas (MONGO_URI en el .env)
+  chat-mongo:
+    profiles: ["local"]
+    image: mongo:7.0
+    restart: unless-stopped
+    command: ["--wiredTigerCacheSizeGB", "0.25"]
+    volumes:
+      - chat-mongo-data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --eval 'db.adminCommand(\"ping\")' --quiet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+    networks: [realtime]
+
+  voice-signaling-service:
+    profiles: ["realtime"]
+    <<: *cross-node
+    image: ${REGISTRY:-discordia}/voice-signaling-service:${VOICE_SIGNALING_TAG:-local}
+    build: ../Voice-Signaling-Session-Service
+    restart: unless-stopped
+    ports:
+      - "8082:8080" # Kong (nodo edge)
+    environment:
+      - NODE_ENV=production
+      - PORT=8080
+      - REDIS_HOST=voice-redis
+      - REDIS_PORT=6379
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-devsecret_change_me_min_32_chars_long}
+      - LIVEKIT_URL=http://livekit:7880
+      # Señalización por Kong. Producción: wss://api.discordia.lol/livekit
+      - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL:-ws://localhost:8000/livekit}
+      - CORE_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8002
+      - NODE_OPTIONS=--max-old-space-size=192
+    depends_on:
+      voice-redis:
+        condition: service_healthy
+      livekit:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+    networks: [realtime]
+
+  livekit:
+    profiles: ["realtime"]
+    image: livekit/livekit-server:v1.13.7
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    ports:
+      - "7880:7880"     # Señalización: solo Kong (Security Group: VPC edge)
+      - "7881:7881"     # Media por TCP (respaldo): clientes, directo
+      - "7882:7882/udp" # Media por UDP: clientes, directo
+    environment:
+      - "LIVEKIT_KEYS=${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:-devsecret_change_me_min_32_chars_long}"
+      # IP que LiveKit anuncia para la media: en producción, la Elastic IP del nodo
+      - NODE_IP=${LIVEKIT_NODE_IP:-127.0.0.1}
+      - LIVEKIT_WEBHOOK_API_KEY=${LIVEKIT_API_KEY:-devkey}
+    volumes:
+      - ../livekit/livekit.yaml:/etc/livekit.yaml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7880 > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 384M
+    networks: [realtime]
+
+  voice-redis:
+    profiles: ["realtime"]
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "40mb", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: 64M
+    networks: [realtime]
+
+  notification-service:
+    profiles: ["realtime"]
+    image: ${REGISTRY:-discordia}/notification-service:${NOTIFICATION_TAG:-local}
+    build: ../Notification-Audit-Metrics-Service
+    restart: unless-stopped
+    ports:
+      - "3001:3000" # Kong (nodo edge)
+    environment:
+      - PORT=3000
+      # RDS. La librería pg de Node no cifra si la URL no lo pide: en producción NOTIFICATION_DB_SSLMODE=no-verify
+      # (cifra sin validar el certificado de Amazon, que Node no trae); en local, disable.
+      - DATABASE_URL=postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-dev-postgres}@${DB_HOST:-host.docker.internal}:5432/notification_db?sslmode=${NOTIFICATION_DB_SSLMODE:-disable}
+      - NODE_OPTIONS=--max-old-space-size=96
+    depends_on:
+      local-postgres:
+        condition: service_healthy
+        required: false # solo existe con el profile local
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/readyz > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+    networks: [realtime]
+
+  # ======================================================================
+  # NODO 3 — INFRA: RabbitMQ, Payments, Prometheus y Grafana
+  # ======================================================================
+  # Prometheus lee los exportadores de los tres nodos por IP:puerto (deploy/observability/).
+  # Dashboards, datasource y reglas: submódulo observability (Pilar).
+  prometheus:
+    profiles: ["infra"]
+    <<: *cross-node
+    image: prom/prometheus:v2.53.0
+    restart: unless-stopped
+    # Completa la plantilla con las IPs de los nodos y arranca (mismo patrón que Kong)
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        sed -e "s|__EDGE_HOST__|$${EDGE_HOST}|g" -e "s|__REALTIME_HOST__|$${REALTIME_HOST}|g"
+        -e "s|__INFRA_HOST__|$${INFRA_HOST}|g" -e "s|__ENVIRONMENT__|$${ENVIRONMENT}|g"
+        /etc/prometheus/prometheus.yml.tmpl > /prometheus/prometheus.yml &&
+        exec /bin/prometheus --config.file=/prometheus/prometheus.yml --storage.tsdb.path=/prometheus
+        --storage.tsdb.retention.time=7d --web.enable-lifecycle
+    environment:
+      - EDGE_HOST=${EDGE_HOST:-host.docker.internal}
+      - REALTIME_HOST=${REALTIME_HOST:-host.docker.internal}
+      - INFRA_HOST=${INFRA_HOST:-host.docker.internal}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+    ports:
+      - "127.0.0.1:9090:9090" # Solo desde el host (en producción, port forwarding por SSM)
+    volumes:
+      - ./observability/prometheus.yml.tmpl:/etc/prometheus/prometheus.yml.tmpl:ro
+      - prometheus-data:/prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+    networks: [infra]
+
+  grafana:
+    profiles: ["infra"]
+    image: grafana/grafana-oss:11.6.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-dev-grafana}
+    ports:
+      - "127.0.0.1:3030:3000" # Solo desde el host (en producción, port forwarding por SSM)
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+    networks: [infra]
+
+  rabbitmq:
+    profiles: ["infra"]
+    image: rabbitmq:3-management-alpine
+    restart: unless-stopped
+    ports:
+      - "5672:5672"              # AMQP: workers de outbox (edge) y consumidores (realtime)
+      - "127.0.0.1:15672:15672"  # Panel: solo desde el host (en producción, port forwarding por SSM)
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-admin}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-admin}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - ../rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - ../rabbitmq/20-memory.conf:/etc/rabbitmq/conf.d/20-memory.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 320M
+    networks: [infra]
+
+  payments-service:
+    profiles: ["infra"]
+    image: ${REGISTRY:-discordia}/payments-service:${PAYMENTS_TAG:-local}
+    build: ../Payments-Monetization-Service
+    restart: unless-stopped
+    ports:
+      - "8003:8000" # Kong (nodo edge)
+    environment:
+      # Driver explícito: SQLAlchemy 2.1 cambió el default de postgresql:// a psycopg 3 (la imagen trae psycopg2)
+      - DATABASE_URL=postgresql+psycopg2://${DB_USER:-postgres}:${DB_PASSWORD:-dev-postgres}@${DB_HOST:-host.docker.internal}:5432/payments_db
+    depends_on:
+      local-postgres:
+        condition: service_healthy
+        required: false # solo existe con el profile local
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 192M
+    networks: [infra]
+
+  # ======================================================================
+  # SOLO LOCAL: Postgres que hace de RDS (profile local)
+  # En producción la base es el RDS (DB_HOST). Acá se publica en el 5432 del host y los servicios le
+  # llegan por host.docker.internal:5432, igual que al RDS desde las EC2. Crea las cuatro bases con
+  # init-dbs.sql (el mismo del compose de la raíz).
+  # ======================================================================
+  local-postgres:
+    profiles: ["local"]
+    image: postgres:18-alpine # misma versión mayor que el RDS
+    restart: unless-stopped
+    command: ["postgres", "-c", "shared_buffers=48MB"]
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dev-postgres}
+      POSTGRES_DB: postgres
+    volumes:
+      - local-postgres-data:/var/lib/postgresql
+      - ../init-dbs.sql:/docker-entrypoint-initdb.d/init-dbs.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+    networks: [data]
+
+  # ======================================================================
+  # EN LOS TRES NODOS: exportadores de métricas (cada máquina reporta lo suyo)
+  # Prometheus (nodo infra) los lee por IP:puerto; el Security Group solo abre 9100 y 9180 a infra.
+  # En local, con los tres profiles activos, hay uno solo (es una sola máquina).
+  # ======================================================================
+  node-exporter:
+    profiles: ["edge", "realtime", "infra"]
+    image: prom/node-exporter:v1.8.2
+    restart: unless-stopped
+    pid: host
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: 32M
+
+  cadvisor:
+    profiles: ["edge", "realtime", "infra"]
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    restart: unless-stopped
+    privileged: true
+    cgroup: host            # ve los cgroups de todos los contenedores
+    devices:
+      - /dev/kmsg           # eventos de OOM del kernel
+    ports:
+      - "9180:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    command:
+      - '--docker_only=true'
+      - '--enable_metrics=cpu,memory,network,disk,oom_event'
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: 96M
+
+# Una red por nodo: aisladas entre sí, como máquinas distintas
+networks:
+  edge:
+  realtime:
+  infra:
+  data: # solo local (local-postgres)
+
+volumes:
+  local-postgres-data:
+  chat-redis-data:
+  chat-mongo-data:
+  rabbitmq-data:
+  prometheus-data:
+  grafana-data:

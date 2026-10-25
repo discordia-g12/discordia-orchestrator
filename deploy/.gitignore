@@ -1,0 +1,7 @@
+.env
+gateway.env
+tls/
+
+/edge/
+/realtime/
+/infra/
