@@ -31,3 +31,13 @@ variable "elastic_ip" {
   type        = bool
   default     = false
 }
+
+variable "imds_hop_limit" {
+  description = <<-EOT
+    Saltos permitidos para llegar al servicio de metadata (IMDSv2). Con 1 solo lo alcanza el host; los
+    contenedores de Docker necesitan 2 para leer las credenciales del rol (ej. S3 en el nodo edge).
+    null: no se toca (queda el valor que trae la AMI).
+  EOT
+  type        = number
+  default     = null
+}

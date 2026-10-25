@@ -30,3 +30,11 @@ output "cloudflare_trusted_ips" {
   description = "Rangos IPv4 de Cloudflare para KONG_TRUSTED_IPS (deploy/gateway.env)"
   value       = join(",", local.cloudflare_ipv4)
 }
+
+output "media_bucket" {
+  description = "S3_BUCKET y S3_PUBLIC_BASE_URL del nodo edge (Auth y Server-Roles)"
+  value = {
+    name            = aws_s3_bucket.media.bucket
+    public_base_url = "https://${aws_s3_bucket.media.bucket_regional_domain_name}"
+  }
+}
