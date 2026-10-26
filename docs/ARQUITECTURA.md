@@ -421,7 +421,7 @@ volumen vacío). Si después se cambia el valor en `nodes.env`, hay que cambiarl
 
 ## 8. Frontend y mobile
 
-- **Web**: Cloudflare Pages compila `Discordia-WebApp` en cada push a `main` (`npm run build`, Node 20) y
+- **Web**: Cloudflare Pages compila `Discordia-WebApp` en cada push a `main` (`npm run build`, Node 22) y
   sirve `dist/`. Variables de build: `VITE_API_URL=https://api.discordia.lol` y `VITE_AUTH0_*` (públicas).
   Sin previews por PR (apuntarían a la API de producción). Headers de seguridad y caché en `public/_headers`.
 - **Mobile**: `eas.json` fija `EXPO_PUBLIC_API_URL=https://api.discordia.lol` en los perfiles `preview` y
