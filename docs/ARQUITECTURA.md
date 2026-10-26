@@ -20,8 +20,6 @@
 11. [Despliegue](#11-despliegue)
 12. [Costos](#12-costos)
 13. [Decisiones y alternativas descartadas](#13-decisiones-y-alternativas-descartadas)
-14. [Estado actual y pasos que faltan](#14-estado-actual-y-pasos-que-faltan)
-15. [Problemas conocidos y cómo se resolvieron](#15-problemas-conocidos-y-cómo-se-resolvieron)
 
 ---
 
@@ -37,9 +35,10 @@
 | Historial del chat | **MongoDB Atlas M0** |
 | Mensajería | **RabbitMQ** en infra; eventos publicados con el patrón **Outbox** |
 | Audio de voz | **LiveKit** en realtime; el audio va directo por UDP 7882 (no pasa por Cloudflare) |
-| Imágenes | Cada repo las publica en **GHCR** desde su CI (tag = SHA del commit) |
+| Avatares e íconos de servidor | **Bucket S3** `discordia-g12-media`: Auth y Server-Roles suben, los clientes leen directo del bucket ([ADR-003](../Auth-User-Service/docs/ADR-003-Avatares.md)) |
+| Imágenes de contenedores | Cada repo las publica en **GHCR** desde su CI (tag = SHA del commit) |
 | Ejecución | **Un solo `deploy/docker-compose.yml`** con un *profile* por nodo; cada EC2 levanta el suyo |
-| Infraestructura | **Terraform** (`infra/terraform/`): VPC, subnets, Security Groups, EC2, DNS y Pages. El RDS solo se **lee** (no lo administra) |
+| Infraestructura | **Terraform** (`infra/terraform/`): VPC, subnets, Security Groups, EC2, bucket S3 y sus usuarios IAM, DNS y Pages. El RDS solo se **lee** (no lo administra) |
 | Observabilidad | Prometheus + Grafana en infra; Node Exporter + cAdvisor en los tres nodos |
 
 ---
@@ -83,10 +82,13 @@ flowchart LR
     end
 
     ATLAS[(MongoDB Atlas M0)]
+    S3[(S3 discordia-g12-media<br/>avatars/ · server-icons/)]
     AUTH0[Auth0]
     GHCR[GHCR<br/>imágenes]
 
     WEB -->|HTTPS| PAGES
+    WEB & APK -.->|GET imágenes| S3
+    AUTH & SR -->|PUT / DELETE| S3
     WEB & APK -->|HTTPS / WSS| PROXY --> KONG
     WEB & APK -.->|audio UDP 7882| LK
     KONG --> AUTH & SR
@@ -95,8 +97,8 @@ flowchart LR
     AUTH & SR & NOTIF & PAY -->|5432 TLS| RDS
     CHAT --> ATLAS
     AUTH & SR -->|eventos outbox| RMQ
-    RMQ -->|member.*| CHAT
-    CHAT & VOICE -->|can-send / can-connect| SR
+    RMQ -->|member.*| CHAT & VOICE
+    CHAT & VOICE -->|access / can-connect| SR
     WEB & APK --> AUTH0
     EDGE & RT & INF -.->|docker pull| GHCR
 ```
@@ -149,6 +151,21 @@ Cada nodo es una EC2 en la subnet pública de la VPC, con IP privada fija y su p
 | Red | DB subnet group `discordia-data` (subnets privadas en `us-east-1a` / `use1-az1` y `us-east-1f`, donde vive el RDS), Security Group `discordia-rds`, sin IP pública |
 | TLS | Obligatorio (`rds.force_ssl = 1`, default de Postgres 18) |
 
+### S3 (fuera de la VPC)
+
+| Dato | Valor |
+|---|---|
+| Bucket | `discordia-g12-media` (`us-east-1`), creado por Terraform (`infra/terraform/storage.tf`) |
+| Contenido | `avatars/` (lo escribe Auth) y `server-icons/` (lo escribe Server-Roles). Cada archivo es un WebP de 256×256 con nombre único (`<prefijo>/<uuid>.webp`, `Cache-Control: immutable`) |
+| Lectura | Pública solo en esos dos prefijos (bucket policy); el resto del bucket es privado y las ACLs están desactivadas |
+| Escritura | Un usuario IAM por servicio (`discordia-auth-media`, `discordia-server-roles-media`) que solo puede hacer `PutObject` / `DeleteObject` en su prefijo. No se usa el rol de la EC2: el servicio funciona igual en cualquier nodo |
+| Claves | Las access keys no las crea Terraform (quedarían en el estado): se crean con `terraform output media_access_key_commands` y van al `nodes.env` de edge (`AUTH_AWS_*`, `SERVER_ROLES_AWS_*`) |
+| Configuración de los servicios | `S3_BUCKET`, `S3_PUBLIC_BASE_URL` (`terraform output media_bucket`), `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`. Sin bucket o sin claves, la subida responde 503 y el resto del servicio funciona igual |
+
+El binario pasa por el servicio (lo valida y lo normaliza con Pillow) pero no se guarda en él: la base
+guarda solo la URL pública (`user_profiles.avatar_url`, `servers.icon_url`). Los clientes cargan las
+imágenes directo desde la URL del bucket, sin pasar por Kong.
+
 ### Solo en local (profile `local`)
 
 | Servicio | Para qué |
@@ -168,6 +185,7 @@ Cada nodo es una EC2 en la subnet pública de la VPC, con IP privada fija y su p
 | Servicio | Plan | Para qué |
 |---|---|---|
 | Cloudflare | Free | DNS, proxy y TLS de la API, Pages (SPA) |
+| Amazon S3 | (misma cuenta de AWS, fuera de la VPC) | Avatares e íconos de servidor |
 | MongoDB Atlas | M0 | Historial del chat |
 | Auth0 | (existente) | Identidad: login, tokens |
 | GitHub / GHCR | Free | Código, CI, imágenes |
@@ -224,7 +242,7 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 | Security Group | Puerto | Desde | Para qué |
 |---|---|---|---|
 | `discordia-edge` | 443/tcp | Rangos de Cloudflare | Kong (API y WebSockets) |
-| `discordia-edge` | 8002/tcp | grupo realtime | `can-send` / `can-connect` de Server-Roles (**temporal**) |
+| `discordia-edge` | 8002/tcp | grupo realtime | `access` / `can-connect` de Server-Roles (**temporal**) |
 | `discordia-realtime` | 3000, 8082, 3001/tcp | grupo edge | Kong → Chat, Voice, Notification |
 | `discordia-realtime` | 7880/tcp | grupo edge | Kong → señalización de LiveKit (`/livekit`) |
 | `discordia-realtime` | 7881/tcp, 7882/udp | 0.0.0.0/0 | Audio WebRTC (LiveKit valida su propio token) |
@@ -265,16 +283,19 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 | Kong | Auth, Server-Roles | HTTP | mismo nodo (`auth-service:8000`, `server-roles-service:8080`) |
 | Kong | Chat (REST y WS), Voice (REST y `/ws/voice`), Notification, LiveKit | HTTP / WebSocket | `REALTIME_HOST:3000/8082/3001/7880` |
 | Kong | Payments | HTTP | `INFRA_HOST:8003` |
-| Chat | Server-Roles `/internal/channels/{id}/can-send` | HTTP síncrono | `EDGE_HOST:8002` — al abrir cada WebSocket |
+| Chat | Server-Roles `/internal/channels/{id}/access` | HTTP síncrono | `EDGE_HOST:8002` — al abrir cada WebSocket y al pedir el historial |
 | Voice | Server-Roles `/internal/channels/{id}/can-connect` | HTTP síncrono (timeout + 3 reintentos) | `EDGE_HOST:8002` — al unirse a voz |
 | Auth / Server-Roles (workers) | RabbitMQ | AMQP (publica) | `INFRA_HOST:5672` |
 | Chat | RabbitMQ | AMQP (consume `member.*`) | `INFRA_HOST:5672` |
+| Voice | RabbitMQ | AMQP (consume `member.banned`, `member.kicked`, `member.left`) | `INFRA_HOST:5672` |
 | Voice | LiveKit | API de servidor | mismo nodo (`livekit:7880`) |
 | LiveKit | Voice `/webhooks/livekit` | Webhook HTTP | mismo nodo |
 | Prometheus | Exportadores de los 3 nodos | HTTP (scrape) | `<NODO>_HOST:9100/9180` |
 | Auth, Server-Roles, Notification, Payments | RDS | Postgres con TLS | `DB_HOST:5432` (endpoint del RDS, por la VPC) |
 | Chat | MongoDB Atlas | TLS | internet (allowlist: Elastic IP de realtime) |
-| Auth, Server-Roles | Auth0 (Auth) / S3 (avatares e íconos) | HTTPS | internet |
+| Auth | Auth0 | HTTPS | internet |
+| Auth, Server-Roles | S3 (`PutObject` / `DeleteObject` en su prefijo) | HTTPS con su usuario IAM | internet (sin NAT ni VPC endpoint: sale por la IP pública de edge) |
+| Clientes | S3 (avatares e íconos) | HTTPS (`GET` público) | internet, directo al bucket (no pasa por Kong ni por Cloudflare) |
 
 ### Pedido a la API
 
@@ -311,6 +332,13 @@ que el cambio. Un worker aparte lo publica en RabbitMQ (al menos una vez; los co
 | Consumidor | Cola | Binding | Qué hace |
 |---|---|---|---|
 | Chat-Engine | `chat_engine_events` (durable) | `member.*` | ban / kick / salida → cierra el WebSocket; mute / unmute → habilita o bloquea el envío |
+| Voice-Signaling | `voice_signaling_events` (durable) | `member.banned`, `member.kicked`, `member.left` | Saca al usuario de la llamada de ese servidor y lo bloquea para que no vuelva a entrar con un token viejo |
+
+**Ver y escribir son permisos distintos** en el chat: `/internal/channels/{id}/access` responde 403 si el
+usuario no es miembro, está baneado o no tiene `VIEW_CHANNELS`. Si puede ver, devuelve `can_send`
+(`SEND_MESSAGES` y sin mute vigente) y `muted_until`. Un usuario muteado abre el canal y lee el historial,
+pero no puede escribir; al abrir el WebSocket recibe `{ "type": "PERMISSIONS_UPDATED", "canSend": false }`
+y, si el mute tiene vencimiento, el chat lo habilita solo cuando vence.
 
 ### Mensaje de chat y ban en vivo
 
@@ -326,9 +354,9 @@ sequenceDiagram
 
     U->>K: WSS /api/v1/chat/channels/{id}/ws
     K->>CH: WebSocket + X-User-Id
-    CH->>SR: GET /internal/channels/{id}/can-send
-    SR-->>CH: 200 + server_id
-    CH->>CH: registra la sesión (canSend = true)
+    CH->>SR: GET /internal/channels/{id}/access
+    SR-->>CH: 200 + server_id, can_send, muted_until
+    CH->>CH: registra la sesión (canSend según la respuesta)
     U->>CH: mensaje
     CH->>M: guarda
     CH-->>U: broadcast a los del canal
@@ -353,13 +381,24 @@ sequenceDiagram
     U->>K: POST /api/v1/voice/rooms/{id}/join
     K->>V: + X-User-Id
     V->>SR: can-connect (timeout 2 s, 3 intentos)
-    V-->>U: token de LiveKit + wss://api.discordia.lol/livekit
+    V-->>U: token de LiveKit (vence en 10 min) + wss://api.discordia.lol/livekit
     U->>K: WSS /livekit (señalización)
     K->>LK: :7880 (sin /livekit)
     U-->>LK: audio UDP 7882 directo a la Elastic IP (TCP 7881 de respaldo)
     LK->>V: webhook (alguien entró / salió)
     V-->>U: presencia por /ws/voice
+
+    Note over SR,V: Un admin banea o expulsa al usuario
+    SR->>V: member.banned / member.kicked (por RabbitMQ)
+    V->>LK: removeParticipant (si la llamada es de ese servidor)
+    V-->>U: presencia actualizada
 ```
+
+Voice guarda en Redis de qué servidor es cada llamada (`user:{id}:voice_server`, `channel:{id}:server`).
+Al recibir un ban, una expulsión o una salida, saca al usuario de la sala solo si la llamada es de ese
+servidor, y guarda un bloqueo (`voice:blocked:{servidor}:{usuario}`, 24 h). Si el usuario entra a una sala
+de ese servidor con un token emitido antes, el webhook `participant_joined` lo saca. El bloqueo se borra
+cuando vuelve a pasar por `/join` (que chequea `can-connect`).
 
 ---
 
@@ -372,6 +411,8 @@ sequenceDiagram
 | `notification_db` | RDS | La usa Notification (realtime) |
 | `payments_db` | RDS | La usa Payments (infra) |
 | Historial del chat | MongoDB Atlas M0 | En local, `chat-mongo` (profile `local`) |
+| Avatares | S3 `discordia-g12-media/avatars/` | Los sube Auth; la URL queda en `auth_db` (`user_profiles.avatar_url`) |
+| Íconos de servidor | S3 `discordia-g12-media/server-icons/` | Los sube Server-Roles; la URL queda en `server_roles_db` (`servers.icon_url`) |
 | Sesiones de voz, presencia | `voice-redis` (realtime) | Local al nodo |
 | Pub/sub del chat | `chat-redis` (realtime) | `noeviction` |
 | Rate limiting | `gateway-redis` (edge) | `allkeys-lru` |
@@ -421,7 +462,7 @@ volumen vacío). Si después se cambia el valor en `nodes.env`, hay que cambiarl
 
 ## 8. Frontend y mobile
 
-- **Web**: Cloudflare Pages compila `Discordia-WebApp` en cada push a `main` (`npm run build`, Node 20) y
+- **Web**: Cloudflare Pages compila `Discordia-WebApp` en cada push a `main` (`npm run build`, Node 22) y
   sirve `dist/`. Variables de build: `VITE_API_URL=https://api.discordia.lol` y `VITE_AUTH0_*` (públicas).
   Sin previews por PR (apuntarían a la API de producción). Headers de seguridad y caché en `public/_headers`.
 - **Mobile**: `eas.json` fija `EXPO_PUBLIC_API_URL=https://api.discordia.lol` en los perfiles `preview` y
@@ -438,7 +479,8 @@ volumen vacío). Si después se cambia el valor en `nodes.env`, hay que cambiarl
 | **infra** | Login, servidores, canales, chat y voz | Payments; eventos en vivo (bans y mutes se aplican al volver: quedan en la cola o en el outbox); métricas |
 | **realtime** | Login, servidores, canales, roles, Payments | Chat, voz, notificaciones |
 | **edge** | Nada desde afuera (es la única entrada) | Toda la API. Los WebSockets abiertos se cortan |
-| **RDS** | Chat ya abierto (mensajes en Atlas) y voz ya conectada | Login, servidores, canales, permisos (nuevos WebSockets y joins de voz fallan en `can-send` / `can-connect`), notificaciones y Payments |
+| **RDS** | Chat ya abierto (mensajes en Atlas) y voz ya conectada | Login, servidores, canales, permisos (nuevos WebSockets y joins de voz fallan en `access` / `can-connect`), notificaciones y Payments |
+| **S3** | Todo lo demás | Subir avatar y crear un servidor con ícono (503, sin dejar nada a medias); las imágenes no se ven |
 
 **El RDS es el punto único de falla de los datos relacionales.** Se aceptó a cambio de no administrar
 Postgres en tres máquinas: AWS se ocupa de parches, backups y de reemplazar el hardware. Multi-AZ lo
@@ -497,7 +539,7 @@ flowchart LR
   `voice-signaling-service`, `notification-service`, `payments-service`.
 - La SPA no usa imagen: la publica Cloudflare Pages.
 
-### Un compose, tres nodos CHEQUEAR !!!
+### Un compose, tres nodos 
 
 `deploy/docker-compose.yml` define los tres nodos. Qué se levanta lo decide `COMPOSE_PROFILES`:
 
@@ -544,6 +586,7 @@ infra/terraform/
 ├── security.tf      Security Group por nodo + RDS, y todas las reglas de entrada
 ├── main.tf          los 3 nodos, lectura del RDS (data source), budget, registro DNS api
 ├── pages.tf         proyecto de Cloudflare Pages + dominio app + CNAME
+├── storage.tf       bucket S3 de imágenes, policy de lectura pública por prefijo, usuario IAM por servicio
 ├── providers.tf     AWS (un perfil) + Cloudflare
 ├── variables.tf · locals.tf · outputs.tf · versions.tf
 └── modules/
@@ -558,8 +601,9 @@ infra/terraform/
   una copia. Alternativa: HCP Terraform (bloque `cloud` comentado en `versions.tf`).
 - `manage_dns = false` hasta el corte: recién ahí Terraform administra `api` y `app`.
 - Un **budget de $1 sobre el gasto neto** (avisa si algo se cobra fuera de los créditos).
-- `terraform output`: IPs de cada nodo, comandos de SSM, `rds_endpoint`, `rds_move_command` y
-  `cloudflare_trusted_ips`.
+- `terraform output`: IPs de cada nodo, comandos de SSM, `rds_endpoint`, `rds_move_command`,
+  `cloudflare_trusted_ips`, `media_bucket` (`S3_BUCKET` y `S3_PUBLIC_BASE_URL`) y
+  `media_access_key_commands` (crear o rotar las claves de cada servicio).
 
 ### Local (simular los tres nodos)
 
@@ -578,92 +622,10 @@ curl -i localhost:8000/livez
 | Un RDS con una base por servicio | Postgres en contenedor por nodo; un RDS por servicio | Uno por servicio cuadruplicaría el costo. Contra: punto único de falla (sección 9) |
 | Una VPC con un Security Group por nodo | Una VPC por nodo + peering | Los tres nodos están en la misma cuenta, así que las VPCs separadas solo sumaban peerings y rutas. El aislamiento entre nodos lo dan los Security Groups igual |
 | RDS movido a la VPC de los nodos | Dejarlo en su VPC + peering | Sin peering ni rutas; la base queda en subnets sin salida a internet y solo la ven los tres nodos |
+| S3 para avatares e íconos, subida a través del servicio | Cloudinary; presigned POST; rol IAM de la EC2 | Un solo proveedor (AWS, mismos créditos y budget); el servicio valida y normaliza la imagen; un usuario IAM por servicio lo deja desplegable en cualquier nodo (ADR-003) |
 | Cloudflare Pages | Vercel | Vercel desaconseja un proxy adelante; Pages convive con la nube naranja |
 | Cloudflare proxy en `api` | DNS directo / Vercel rewrites | Oculta la IP, TLS gratis, anti-DDoS. Vercel no soporta WebSockets hacia afuera |
 | Compose por nodo + imágenes en GHCR | systemd por contenedor, ECS | Mismo archivo en local y producción; despliegue por servicio con `--no-deps` |
 | Redis local en cada nodo | Un Redis compartido en infra | Si cae infra, chat y presencia de voz siguen |
-| Sesión + eventos `member.*` (chat) | `can-send` en cada mensaje | Saca la llamada síncrona de cada mensaje |
-| Exportadores expuestos solo a infra | Alloy + `remote_write` (ADR-O3) | Más simple para empezar. **Pilar debería actualizar el ADR-O3** |
-
----
-
-## 13. Estado actual y pasos que faltan
-
-### Estado de los nodos
-
-| Nodo | Estado |
-|---|---|
-| infra | Estuvo arriba en el diseño viejo (3 VPCs, Postgres local). Se recrea con el nuevo Terraform |
-| realtime | Estuvo arriba en el diseño viejo (Atlas, Redis y RabbitMQ OK). Se recrea con el nuevo Terraform |
-| edge | **Nunca levantó**: Auth y Server-Roles no encontraban sus usuarios en el Postgres local. Se resuelve con el RDS (ya tiene las bases y el usuario) |
-
-El código para la VPC única y el RDS está escrito (Terraform, compose, `.env.example`); falta aplicarlo.
-Aplicar el Terraform **reemplaza las tres EC2** (cambian de VPC y de IP privada); las Elastic IPs de edge y
-realtime se conservan.
-
-### Pasos que faltan
-
-**1. VPC única + RDS y levantar los nodos**
-
-- [ ] Commitear y mergear a `develop` (orquestador): Terraform, `deploy/docker-compose.yml`,
-      `deploy/.env.example`, `deploy/README.md`, este documento.
-- [ ] Guardar una copia de `/etc/discordia/nodes.env` de cada nodo (las EC2 se reemplazan).
-- [ ] `terraform.tfvars`: `aws_profile = "discordia-edge"` en vez del mapa `aws_profiles`.
-- [ ] `terraform plan` / `apply`: crea la VPC nueva y las EC2, borra las VPCs viejas y los peerings.
-- [ ] Mover el RDS: `$(terraform output -raw rds_move_command)` (desde ese momento el monolito se queda sin base).
-- [ ] Sacar los providers temporales `aws.edge/realtime/infra` de `providers.tf` y verificar `terraform plan` sin cambios.
-- [ ] En cada nodo: clonar, `nodes.env` con las IPs nuevas y `DB_*`, `docker login ghcr.io`, `dcn`, levantar
-      (infra → realtime → edge). Verificar `healthy` en Auth, Server-Roles, Notification y Payments.
-- [ ] Edge: `deploy/gateway.env` (TLS + `KONG_TRUSTED_IPS`) y el Origin Certificate en `deploy/tls/`.
-- [ ] Verificar `"rabbitmq":"ok"` en `/readyz` del chat y que los workers de outbox de edge conectan.
-- [ ] Verificar en Prometheus (*Status → Targets*) que los tres nodos aparecen *UP*.
-- [ ] Payments: `/readyz` en `ready` (imagen nueva con SQLAlchemy 2.0).
-
-YA ESTA
-
-**2. Corte (ventana de mantenimiento)**
-
-- [ ] Frenar el monolito.
-- [ ] (Sin migración de datos: el RDS es el mismo y no hay datos que conservar.)
-- [ ] Cloudflare: borrar los registros viejos `api`, `app` y los de Porkbun (`*`, `www`, raíz).
-- [ ] `manage_dns = true` y `terraform apply` (crea `api` → edge y `app` → Pages).
-- [ ] Cloudflare: SSL/TLS **Full (strict)** y **Always Use HTTPS**.
-- [ ] Auth0: `https://app.discordia.lol` en Callback URLs, Logout URLs y Web Origins.
-- [ ] Verificar: `curl -I https://api.discordia.lol/livez` → 200 y la IP de edge directa → timeout.
-
-YA ESTA (creo)
-
-**3. Validación de punta a punta**
-
-- [ ] Login en `https://app.discordia.lol`.
-- [ ] Chat entre web y APK; un canal inactivo más de 5 minutos sigue recibiendo mensajes.
-- [ ] Voz entre web y APK con datos móviles (el WebSocket a `/livekit` responde 101; el audio usa la
-      Elastic IP de realtime en el puerto 7882).
-- [ ] Ban de un usuario conectado: se le cierra el chat.
-- [ ] Apagar infra y verificar que chat y voz siguen.
-
-**4. Cierre**
-
-- [ ] Después de unos días estables: `terraform destroy` en `terraform/` (EC2 del monolito) y borrar su VPC
-      vieja (`vpc-085838c0959ba944c`, cuando ya no tenga el RDS ni nada adentro). El RDS **no** se borra.
-- [ ] Revisar que no queden budgets con alertas.
-
-**5. Pendientes de código y operación**
-
-- [ ] Chat: aplicar en vivo los cambios de rol (`role.*`, `member.role_*`); hoy solo aplica ban, kick,
-      salida y mute.
-- [ ] Chat: separar permiso de **ver** del de **escribir** (hoy un usuario muteado no puede ni leer el canal).
-- [ ] Chat: una cola por instancia si algún día hay más de una (hoy `chat_engine_events` es compartida).
-- [ ] Voice: consumir `member.banned` / `member.kicked` para sacar al usuario de la llamada.
-- [ ] Foto de permisos por eventos para eliminar `can-send` / `can-connect` y cerrar el puerto 8002.
-- [ ] Server-Roles: los íconos de servidor no se guardan (TODO de storage).
-- [ ] Backups: verificar la retención de backups automáticos del RDS y `mongodump` de Atlas (M0 no tiene backups).
-- [ ] RDS: un usuario por servicio (permisos solo sobre su base) y TLS con `verify-full` en Notification.
-- [ ] Compose de la raíz: usar `postgres` por defecto en vez de `RDS_HOST` (hoy el `.env.example` trae el RDS).
-- [ ] Fijar versiones de dependencias en todos los repos (un `sqlalchemy` sin fijar rompió Payments).
-- [ ] Mobile: sacar `usesCleartextTraffic` cuando todo vaya por HTTPS.
-- [ ] Workflow de deploy por SSM (hoy el deploy es manual en cada nodo).
-- [ ] Pilar: actualizar el ADR-O3 (exportadores expuestos a infra).
-- [ ] Evaluar `t3.small` para realtime si LiveKit se queda sin memoria o CPU en la micro.
-
----
+| Sesión + eventos `member.*` (chat) | `access` en cada mensaje | Saca la llamada síncrona de cada mensaje |
+| Exportadores expuestos solo a infra | Alloy + `remote_write` (ADR-O3) | Más simple para empezar.|

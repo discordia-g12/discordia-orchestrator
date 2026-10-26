@@ -1,0 +1,127 @@
+name: Deploy
+
+# Workflow reutilizable: lo llama el job "deploy" del CI de cada servicio después de publicar la imagen.
+# Entra a AWS por OIDC con el rol discordia-cd (sin claves guardadas en GitHub) y le ordena al nodo, por SSM,
+# que corra deploy/deploy-service.sh. Si el deploy falla o hace rollback, este job falla. Ver docs/TODO-CD.md.
+#
+#   deploy:
+#     needs: docker
+#     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+#     permissions:
+#       id-token: write
+#       contents: read
+#     uses: discordia-g12/discordia-orchestrator/.github/workflows/deploy.yml@main
+#     with:
+#       service: auth-service
+#       node: edge
+#       sha: ${{ github.sha }}
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: "Nombre de la imagen en GHCR (auth-service, payments-service, ...)"
+        required: true
+        type: string
+      node:
+        description: "Nodo donde corre: edge, realtime o infra"
+        required: true
+        type: string
+      sha:
+        description: "Commit completo (40 caracteres), el tag de la imagen"
+        required: true
+        type: string
+
+env:
+  AWS_REGION: us-east-1
+  # terraform output cd_role_arn. No es un secreto; la variable de organización necesita admin de la org.
+  CD_ROLE_ARN: arn:aws:iam::760144414058:role/discordia-cd
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      id-token: write # el token OIDC que se cambia por credenciales del rol
+      contents: read
+    # Dos deploys del mismo repo no se pisan: el segundo espera. Entre repos, el lock lo pone el script en el nodo.
+    concurrency:
+      group: deploy-${{ github.repository }}
+      cancel-in-progress: false
+    # Los inputs entran por env y no con ${{ }} dentro de los run: así no se pueden inyectar comandos
+    env:
+      SERVICE: ${{ inputs.service }}
+      NODE: ${{ inputs.node }}
+      SHA: ${{ inputs.sha }}
+    steps:
+      - name: Validate inputs
+        run: |
+          [[ "$NODE" =~ ^(edge|realtime|infra)$ ]] || { echo "::error::nodo desconocido: $NODE"; exit 1; }
+          [[ "$SERVICE" =~ ^[a-z-]+$ ]] || { echo "::error::imagen inválida: $SERVICE"; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::el SHA tiene que ser el commit completo: $SHA"; exit 1; }
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.CD_ROLE_ARN }}
+          role-session-name: deploy-${{ inputs.service }}-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Find the node
+        id: node
+        run: |
+          ids=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=discordia-$NODE" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].InstanceId' --output text)
+          [ "$(wc -w <<< "$ids")" -eq 1 ] || { echo "::error::se esperaba una instancia discordia-$NODE corriendo, hay: '$ids'"; exit 1; }
+          echo "instance_id=$ids" >> "$GITHUB_OUTPUT"
+          echo "discordia-$NODE: $ids"
+
+      - name: Run deploy-service.sh on the node
+        id: send
+        env:
+          INSTANCE_ID: ${{ steps.node.outputs.instance_id }}
+        run: |
+          # El pull primero: así corre la versión del script que está en main (y existe en el primer deploy).
+          # Si falla, sigue con lo que hay en el nodo, igual que el script.
+          cmd="export HOME=/root; git -c safe.directory=/opt/discordia -C /opt/discordia pull --ff-only --quiet || echo 'aviso: git pull falló'; /opt/discordia/deploy/deploy-service.sh $SERVICE $SHA"
+          id=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy $SERVICE ${SHA:0:7} (${GITHUB_REPOSITORY#*/} run $GITHUB_RUN_ID)" \
+            --parameters "$(jq -n --arg c "$cmd" '{commands: [$c], executionTimeout: ["900"]}')" \
+            --query Command.CommandId --output text)
+          echo "command_id=$id" >> "$GITHUB_OUTPUT"
+          echo "SSM command: $id"
+
+      - name: Wait for the result
+        env:
+          INSTANCE_ID: ${{ steps.node.outputs.instance_id }}
+          COMMAND_ID: ${{ steps.send.outputs.command_id }}
+        run: |
+          # No se usa "aws ssm wait command-executed": se corta a los 100 s, y el deploy puede tardar más
+          # (pull de la imagen + hasta 120 s de healthcheck, y otro tanto si hace rollback).
+          status=Pending
+          for _ in $(seq 180); do # 180 × 5 s = 15 min, lo mismo que executionTimeout
+            sleep 5
+            status=$(aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+              --query Status --output text 2>/dev/null) || continue # recién enviado puede no existir todavía
+            case "$status" in Pending|InProgress|Delayed) ;; *) break ;; esac
+          done
+
+          aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" --output json > result.json
+          echo "::group::Salida del nodo"
+          jq -r .StandardOutputContent result.json
+          echo "::endgroup::"
+          if [ -n "$(jq -r .StandardErrorContent result.json)" ]; then
+            echo "::group::stderr del nodo (docker compose escribe ahí su progreso: no son necesariamente errores)"
+            jq -r .StandardErrorContent result.json
+            echo "::endgroup::"
+          fi
+
+          echo "### Deploy de \`$SERVICE\` en $NODE: $status" >> "$GITHUB_STEP_SUMMARY"
+          echo "Imagen \`ghcr.io/discordia-g12/$SERVICE:$SHA\` · comando SSM \`$COMMAND_ID\`" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$status" != Success ]; then
+            echo "::error::el deploy terminó en $status: ver la salida del nodo (si hubo rollback, el nodo volvió al tag anterior)"
+            exit 1
+          fi

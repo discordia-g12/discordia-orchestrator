@@ -6,10 +6,10 @@ locals {
 
   nodes = ["edge", "realtime", "infra"]
 
-  vpc_cidr       = "10.0.0.0/16"
-  public_cidr    = "10.0.1.0/24"  # las 3 EC2
-  data_a_cidr    = "10.0.64.0/24" # RDS (sin salida a internet)
-  data_b_cidr    = "10.0.66.0/24" # RDS: su zona actual (us-east-1f) y segunda zona del grupo
+  vpc_cidr    = "10.0.0.0/16"
+  public_cidr = "10.0.1.0/24"  # las 3 EC2
+  data_a_cidr = "10.0.64.0/24" # RDS (sin salida a internet)
+  data_b_cidr = "10.0.66.0/24" # RDS: su zona actual (us-east-1f) y segunda zona del grupo
 
   # IPs privadas fijas: van en los nodes.env (EDGE_HOST, REALTIME_HOST, INFRA_HOST)
   private_ips = {
@@ -24,6 +24,18 @@ locals {
     server-roles = "server-icons"
   }
   media_prefixes = values(local.media_writers)
+
+  # Repos que despliegan con el rol discordia-cd (iam-cd.tf): los siete servicios y el orquestador (configuración)
+  cd_repos = [
+    "Gateway",
+    "Auth-User-Service",
+    "Server-Roles-Core-Service",
+    "Chat-Engine-Service",
+    "Voice-Signaling-Session-Service",
+    "Notification-Audit-Metrics-Service",
+    "Payments-Monetization-Service",
+    "discordia-orchestrator",
+  ]
 
   # Solo Cloudflare puede llegarle a Kong (el origen no queda expuesto a internet)
   cloudflare_ipv4 = data.cloudflare_ip_ranges.current.ipv4_cidr_blocks
