@@ -60,7 +60,7 @@ jobs:
           [[ "$SERVICE" =~ ^[a-z-]+$ ]] || { echo "::error::imagen inválida: $SERVICE"; exit 1; }
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::el SHA tiene que ser el commit completo: $SHA"; exit 1; }
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ env.CD_ROLE_ARN }}
           role-session-name: deploy-${{ inputs.service }}-${{ github.run_id }}

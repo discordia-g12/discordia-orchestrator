@@ -25,17 +25,21 @@ locals {
   }
   media_prefixes = values(local.media_writers)
 
-  # Repos que despliegan con el rol discordia-cd (iam-cd.tf): los siete servicios y el orquestador (configuración)
-  cd_repos = [
-    "Gateway",
-    "Auth-User-Service",
-    "Server-Roles-Core-Service",
-    "Chat-Engine-Service",
-    "Voice-Signaling-Session-Service",
-    "Notification-Audit-Metrics-Service",
-    "Payments-Monetization-Service",
-    "discordia-orchestrator",
-  ]
+  # Repos que despliegan con el rol discordia-cd (iam-cd.tf): los siete servicios y el orquestador (configuración).
+  # Nombre → ID numérico: GitHub firma el "sub" del token OIDC en formato inmutable, con los IDs de la org y del
+  # repo (gh api repos/discordia-g12/<repo>/actions/oidc/customization/sub). Un repo recreado con el mismo
+  # nombre tiene otro ID y no puede asumir el rol.
+  github_org_id = 324247750
+  cd_repos = {
+    "Gateway"                            = 1359471842
+    "Auth-User-Service"                  = 1359470393
+    "Server-Roles-Core-Service"          = 1359470828
+    "Chat-Engine-Service"                = 1359471212
+    "Voice-Signaling-Session-Service"    = 1359473056
+    "Notification-Audit-Metrics-Service" = 1359474404
+    "Payments-Monetization-Service"      = 1359473980
+    "discordia-orchestrator"             = 1359549235
+  }
 
   # Solo Cloudflare puede llegarle a Kong (el origen no queda expuesto a internet)
   cloudflare_ipv4 = data.cloudflare_ip_ranges.current.ipv4_cidr_blocks

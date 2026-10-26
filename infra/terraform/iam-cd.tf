@@ -27,7 +27,8 @@ resource "aws_iam_role" "cd" {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           "token.actions.githubusercontent.com:sub" = [
-            for repo in local.cd_repos : "repo:discordia-g12/${repo}:ref:refs/heads/main"
+            for repo, id in local.cd_repos :
+            "repo:discordia-g12@${local.github_org_id}/${repo}@${id}:ref:refs/heads/main"
           ]
         }
       }
