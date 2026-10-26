@@ -46,3 +46,8 @@ output "media_access_key_commands" {
     service => "aws iam create-access-key --profile ${var.aws_profile} --user-name ${user.name}"
   }
 }
+
+output "cd_role_arn" {
+  description = "Rol que asume el workflow de deploy (fijo en .github/workflows/deploy.yml)"
+  value       = aws_iam_role.cd.arn
+}
