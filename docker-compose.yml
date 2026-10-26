@@ -442,6 +442,9 @@ services:
       - LIVEKIT_URL=http://livekit:7880
       # URL que se le devuelve al cliente junto con el token: el browser se conecta directo a LiveKit
       - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL:-ws://localhost:7880}
+      # Eventos member.banned / kicked / left: saca al usuario de la llamada
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@rabbitmq:5672/
+      - RABBITMQ_EXCHANGE=server.events
       - NODE_OPTIONS=--max-old-space-size=192
     depends_on:
       voice-redis:

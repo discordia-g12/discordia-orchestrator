@@ -9,9 +9,9 @@ Al cerrar un ítem, borrarlo de acá (y mencionarlo en el PR).
 
 | Prioridad | Ítems | Por qué |
 |-----------|-------|---------|
-| **Alta** | R2, V1, C2 | Una dependencia sin fijar ya tiró un servicio; un usuario baneado sigue en la llamada; un muteado no puede leer el chat |
-| **Media** | C1, V2, D1, D2, L1, L2, I1 | Permisos que no se actualizan en vivo, usuario maestro compartido, TLS sin validar, archivos de ejemplo desactualizados, estado de Terraform en una sola máquina |
-| **Baja** | R1, P1, C3, C4, M1, I2 | Payments todavía no tiene funcionalidad, mejoras de diseño, o solo hacen falta si el sistema crece |
+| **Alta** | R2 | Una dependencia sin fijar ya tiró un servicio |
+| **Media** | C1, V2, W1, W2, D1, D2, L1, L2, I1 | Permisos que no se actualizan en vivo, el cliente no muestra el mute ni el ban, usuario maestro compartido, TLS sin validar, archivos de ejemplo desactualizados, estado de Terraform en una sola máquina |
+| **Baja** | R1, P1, P2, V3, V4, C3, C4, M1, I2 | Payments todavía no tiene funcionalidad, mejoras de diseño, limpieza después del deploy, o solo hacen falta si el sistema crece |
 
 ---
 
@@ -51,80 +51,13 @@ Payments. Cada paso es un PR por repo, y el CI de cada uno ya construye la image
 Verificación: el CI de cada repo en verde y levantar `deploy/docker-compose.yml` con el profile `local`
 (login, crear servidor, chat, voz).
 
-### V1 — Sacar de la llamada al baneado o expulsado
-
-Server-Roles no cambia: ya emite `member.banned`, `member.kicked` y `member.left` con `server_id` y `user_id`.
-
-1. **Guardar a qué servidor pertenece la llamada.** Voice guarda en Redis solo el canal
-   (`user:{id}:voice_channel`), y `checkCanConnect` descarta el `server_id` que devuelve `can-connect`.
-   Devolverlo y guardarlo al unirse (`user:{id}:voice_server`), y borrarlo en `/leave` y en el webhook. Sin
-   esto, un ban del servidor A sacaría al usuario de una llamada del servidor B.
-2. **Consumidor de RabbitMQ.** Agregar `amqplib` y copiar el `EventConsumer` de Chat, que ya tiene
-   reconexión con backoff y tests. Cola propia y durable (`voice_signaling_events`) con los bindings
-   `member.banned`, `member.kicked` y `member.left`. Agregar `RABBITMQ_URL` a Voice en
-   `deploy/docker-compose.yml` (el Security Group ya abre 5672 desde realtime). `/readyz` informa el estado
-   de RabbitMQ sin marcarse no-ready, igual que Chat.
-3. **Handler.** Si `user:{id}:voice_server` coincide con el `server_id` del evento:
-   `roomService.removeParticipant(canal, userId)` (ignorar el error si ya no está), limpiar Redis
-   (`removeFromChannel`, que ya existe) y publicar la presencia del canal.
-4. **Que no pueda volver a entrar con el token viejo.**
-   - `ttl` corto en el `AccessToken` (por ejemplo 10 minutos). LiveKit renueva el token de quien ya está
-     conectado, así que las llamadas largas no se cortan.
-   - En el webhook `participant_joined`: si `user:{id}:voice_channel` no es esa sala (no pasó por `/join`),
-     `removeParticipant`. Esto cubre el token todavía vigente o renovado de alguien que ya fue sacado.
-5. **Cliente.** Hoy cualquier corte muestra "Se perdió la conexión con el canal de voz". Usar el
-   `DisconnectReason` de LiveKit (`PARTICIPANT_REMOVED`) para mostrar que lo sacaron. Entra en el refactor
-   del WebApp y no bloquea el backend.
-6. **Tests.** Handler con Redis y `RoomServiceClient` simulados (incluido el caso de otro servidor),
-   consumidor con la conexión falsa que usan los tests de Chat, y el chequeo del webhook. A mano: dos
-   usuarios en una llamada, banear a uno, ver que sale, e intentar volver a entrar.
-
-Deja armado lo necesario para V2 (`member.muted` / `unmuted` → `updateParticipant` con `canPublish`).
-
-### C2 — Separar el permiso de ver del de escribir
-
-Resuelve también el vencimiento del mute: hoy se agenda con un `setTimeout` en memoria, y un mute que vence
-después de un reinicio del chat no se levantaría en una sesión abierta con `canSend: false` (paso 4).
-
-1. **Server-Roles: una sola función de permisos.** Extraer el cálculo de permisos efectivos (dueño,
-   `ADMINISTRATOR`, roles, overrides de rol y de miembro), hoy copiado en `can-send` y `can-connect`, a una
-   función que devuelva el bitmask del usuario en el canal. Los dos endpoints la usan sin cambiar sus
-   respuestas. Sirve también para P1.
-2. **Server-Roles: endpoint nuevo** `GET /internal/channels/{id}/access?user_id=`:
-   - 404 si el canal no existe.
-   - 403 si no es miembro, está baneado o no tiene `VIEW_CHANNELS`.
-   - 200 con `{ server_id, can_send, muted_until }`: `can_send` es `SEND_MESSAGES` y sin mute vigente;
-     `muted_until` es el `expires_at` del mute (`null` si no hay o si es indefinido).
-
-   Es una sola llamada en lugar de dos. `@everyone` ya trae `VIEW_CHANNELS`, así que los miembros actuales no
-   pierden acceso: solo se bloquea a quien tenga un rol u override que lo niegue. `can-send` sigue hasta que
-   Chat deje de usarlo y después se borra.
-3. **Chat: guard.** `channelAccessGuard` llama a `/access`, responde 403 solo si no puede ver y guarda
-   `canSend` y `mutedUntil` en el request. El historial (`GET /channels/:id/messages`) queda accesible para un
-   muteado.
-4. **Chat: WebSocket.** Registrar la sesión con el `canSend` de la respuesta (hoy siempre `true`) y mandar
-   al abrir un primer `{ type: "PERMISSIONS_UPDATED", canSend, channelId }`, así el cliente sabe desde el
-   principio si puede escribir. Si viene `mutedUntil`, agendar la expiración con el mismo timer que
-   `member.muted` (`scheduleMuteExpiry`, hoy privado): así un mute que vence después de un reinicio del chat
-   se levanta igual.
-5. **Cliente** (WebApp y mobile, en el refactor): hoy `PERMISSIONS_UPDATED` se ignora y el muteado recién se
-   entera cuando falla el envío. Deshabilitar el input con un aviso ("Estás silenciado") según ese mensaje.
-   Además, `chatSocket` reconecta siempre: con los códigos 4002 / 4003 (expulsado o baneado) tiene que dejar
-   de reintentar.
-6. **Orden de despliegue:** Server-Roles primero (el endpoint nuevo no rompe nada), después Chat, después
-   borrar `can-send`.
-7. **Tests.** Server-Roles: dueño, admin, sin `VIEW_CHANNELS`, override que niega `VIEW_CHANNELS`, muteado
-   temporal e indefinido, baneado, no miembro. Chat: un muteado abre el socket y lee el historial pero no
-   puede enviar; al vencer el mute puede enviar; sin `VIEW_CHANNELS`, 403.
-
 ---
 
 ## Chat (Chat-Engine-Service)
 
 | # | Qué falta | Detalle |
 |---|-----------|---------|
-| C1 | **Aplicar en vivo los cambios de rol** | `EventConsumer` solo se suscribe a `member.*` y solo maneja `banned`, `kicked`, `left`, `muted` y `unmuted`. Si a alguien le sacan un rol (`member.role_removed`) o un rol pierde `SEND_MESSAGES` (`role.permissions_updated`, `role.deleted`), la sesión abierta sigue con `canSend: true` hasta que reconecta. Para `member.role_*` alcanza con volver a llamar a `/access` (C2) para las sesiones de ese usuario en ese servidor y mandar `PERMISSIONS_UPDATED`. Para `role.*` el evento no trae `user_id` (hoy `handleEvent` lo descarta): o se rechequean todas las sesiones del servidor, o Server-Roles agrega la lista de usuarios afectados al payload. Lo mismo pasa con `channel.deleted`: las sesiones de un canal borrado quedan abiertas. Conviene hacerlo después de C2. |
-| C2 | **Separar el permiso de ver del de escribir** | `channelAccessGuard` usa `can-send` para abrir el WebSocket **y** para el historial. `can-send` responde 403 si el usuario está muteado o no tiene `SEND_MESSAGES`, así que un muteado no puede ni leer el canal. Además `VIEW_CHANNELS` no se chequea en ningún lado. Plan arriba. |
+| C1 | **Aplicar en vivo los cambios de rol** | `EventConsumer` solo se suscribe a `member.*` y solo maneja `banned`, `kicked`, `left`, `muted` y `unmuted`. Si a alguien le sacan un rol (`member.role_removed`) o un rol pierde `SEND_MESSAGES` (`role.permissions_updated`, `role.deleted`), la sesión abierta sigue con `canSend: true` hasta que reconecta. Para `member.role_*` alcanza con volver a llamar a `/internal/channels/{id}/access` para las sesiones de ese usuario en ese servidor y mandar `PERMISSIONS_UPDATED` con el `canSend` nuevo (y cerrar la sesión si ya no puede ver el canal). Para `role.*` el evento no trae `user_id` (hoy `handleEvent` lo descarta): o se rechequean todas las sesiones del servidor, o Server-Roles agrega la lista de usuarios afectados al payload. Lo mismo pasa con `channel.deleted`: las sesiones de un canal borrado quedan abiertas. |
 | C3 | Más de una instancia del chat | Hoy hay una sola. Si se agregan más hacen falta dos cosas: una cola por instancia (`RABBITMQ_QUEUE` distinto, idealmente `exclusive`/`auto-delete` con el nombre del contenedor) porque `chat_engine_events` es compartida y cada evento le llega a una sola instancia, y el pub/sub de Redis para repartir los mensajes, porque hoy el broadcast es solo a los sockets de la misma instancia (`SessionManager` en memoria; el cliente Redis ya está creado pero no se usa para eso). |
 | C4 | Límite del historial | `limit` viene de la query sin tope (`?limit=1000000` le pide todo el canal a Atlas M0) y `getMissedMessages` no tiene límite. Poner un máximo (ej. 100) y validar `before` / `last_message_id_seen` como ObjectId. |
 
@@ -132,14 +65,16 @@ después de un reinicio del chat no se levantaría en una sesión abierta con `c
 
 | # | Qué falta | Detalle |
 |---|-----------|---------|
-| V1 | **Sacar de la llamada al baneado o expulsado** | Voice no consume RabbitMQ: un usuario baneado o expulsado sigue hablando hasta que corta. Además el token de LiveKit se emite sin `ttl` (el default del SDK es de horas), así que con ese token se puede volver a entrar sin pasar por `can-connect`. Plan arriba. |
-| V2 | El mute no aplica a la voz | `can-connect` no mira `ServerMute` ni `SPEAK`, y el token siempre lleva `canPublish: true`. Un muteado, o alguien sin `SPEAK`, puede hablar. Devolver los permisos en la respuesta de `can-connect` y usar `canPublish` según `SPEAK` y mute; con V1 andando, `member.muted` / `unmuted` pueden cambiar el permiso en vivo con `updateParticipant`. |
+| V2 | El mute no aplica a la voz | `can-connect` no mira `ServerMute` ni `SPEAK`, y el token siempre lleva `canPublish: true`. Un muteado, o alguien sin `SPEAK`, puede hablar. Devolver los permisos en la respuesta de `can-connect` y usar `canPublish` según `SPEAK` y mute. El consumidor de eventos de Voice ya existe (`modules/voice/events.ts`): sumar los bindings `member.muted` / `member.unmuted` y cambiar el permiso en vivo con `roomService.updateParticipant`. |
+| V3 | Llamadas abiertas antes del deploy del consumidor | Voice guarda de qué servidor es cada llamada recién desde `/join` con la versión nueva (`user:{id}:voice_server`). A quien ya estaba en una llamada al desplegar, un ban no lo saca hasta que vuelva a entrar. Se resuelve solo en cuanto todos vuelven a unirse; no hace falta migrar nada. |
+| V4 | Evento que falla al aplicarse | Si Redis o LiveKit fallan mientras se procesa un ban, el evento se descarta (no se reencola para no entrar en loop). El bloqueo suele quedar guardado igual (es lo primero que se escribe), pero el usuario sigue en la llamada actual. Si pasa seguido, reencolar con un límite de reintentos (header `x-death` con una dead-letter queue). |
 
 ## Permisos entre servicios
 
 | # | Qué falta | Detalle |
 |---|-----------|---------|
-| P1 | Foto de permisos por eventos (eliminar `can-send` / `can-connect`) | Hoy Chat y Voice llaman por HTTP a Server-Roles (edge, puerto 8002 abierto a realtime) cada vez que se abre un chat o alguien entra a una llamada. No suma un punto de falla (si edge cae, Kong también), pero acopla los servicios, agrega latencia y deja un puerto abierto entre nodos. La idea es que Chat y Voice armen su propia copia de miembros, roles, overrides, bans y mutes a partir de los eventos y calculen el permiso localmente. Es el cambio más grande de la lista y depende de C1, C2 y V1 (los eventos tienen que traer todo lo necesario, y hace falta una carga inicial). Mientras tanto, los endpoints `/internal/*` no tienen autenticación: cualquiera que llegue al 8002 puede preguntar los permisos de cualquier usuario. |
+| P1 | Foto de permisos por eventos (eliminar `can-send` / `can-connect`) | Hoy Chat y Voice llaman por HTTP a Server-Roles (edge, puerto 8002 abierto a realtime) cada vez que se abre un chat o alguien entra a una llamada. No suma un punto de falla (si edge cae, Kong también), pero acopla los servicios, agrega latencia y deja un puerto abierto entre nodos. La idea es que Chat y Voice armen su propia copia de miembros, roles, overrides, bans y mutes a partir de los eventos y calculen el permiso localmente. Es el cambio más grande de la lista y depende de C1 (los eventos tienen que traer todo lo necesario, y hace falta una carga inicial). El cálculo de permisos ya es una función pura, sin base de datos (`effective_channel_permissions` en `Server-Roles-Core-Service/app/core/permissions.py`): Chat y Voice pueden replicarla tal cual. Mientras tanto, los endpoints `/internal/*` no tienen autenticación: cualquiera que llegue al 8002 puede preguntar los permisos de cualquier usuario. |
+| P2 | Borrar `can-send` | Chat ya usa `/internal/channels/{id}/access`. `can-send` queda (marcado como deprecado) solo para que una versión vieja de Chat siga andando durante el deploy. Cuando Chat nuevo esté en producción, borrar el endpoint y sus tests (`tests/test_internal_can_send.py` y el caso de `test_server_bans.py` que lo usa). |
 
 ## Datos
 
@@ -168,6 +103,15 @@ después de un reinicio del chat no se levantaría en una sesión abierta con `c
 |---|-----------|---------|
 | I1 | Estado de Terraform en una sola máquina | `terraform.tfstate` es el registro de qué recursos de AWS y Cloudflare creó Terraform (IDs de la VPC, las EC2, el bucket, los Security Groups). Hoy está solo en la máquina de quien hizo el `apply` (está en `.gitignore`, bien, porque puede tener datos sensibles). Si se pierde, Terraform no sabe que esos recursos existen: el próximo `apply` intenta crearlos de nuevo y falla, o hay que importarlos uno por uno. Si otra persona aplica desde su máquina, parte de un estado vacío o viejo. `versions.tf` ya eligió HCP Terraform (bloque `cloud` comentado), falta activarlo: crear la organización `discordia-g12` y el workspace `discordia-prod` en app.terraform.io (plan Free), poner el workspace en *Execution mode: Local* (el `plan` y el `apply` siguen corriendo en tu máquina con tu perfil de AWS; HCP solo guarda el estado y lo bloquea mientras alguien aplica), descomentar el bloque, `terraform login`, `terraform init` (pregunta si migrar el estado local: sí), verificar que `terraform plan` no muestre cambios y recién ahí borrar el `terraform.tfstate` local. Actualizar el comentario de `versions.tf`, que todavía habla de tres cuentas. |
 | I2 | Tamaño del nodo realtime | Realtime es una `t3.micro` (1 GB) con Chat, Voice, LiveKit, Notification y dos Redis. Si LiveKit se queda sin memoria o CPU con varias llamadas, evaluar `t3.small` solo para ese nodo (`instance_type` es una sola variable para los tres: habría que separarla). Mirar el dashboard de cAdvisor antes de decidir. |
+
+## Clientes: permisos de chat y voz (en espera del refactor del WebApp)
+
+El backend ya los soporta; falta que la web y mobile los muestren (el código compartido está en `packages/core`).
+
+| # | Qué falta | Detalle |
+|---|-----------|---------|
+| W1 | **Mostrar que el usuario está silenciado** | Al abrir el WebSocket de un canal donde no puede escribir, el chat manda `{ "type": "PERMISSIONS_UPDATED", "canSend": false, "channelId" }`, y lo mismo con `canSend: true` cuando vence o se levanta el mute. Hoy `chatSocket.ts` descarta todo mensaje que no sea de chat, así que el muteado recién se entera cuando falla el envío (`{ error, status: 403 }`). Exponer el `canSend` en `useChatSocket`, deshabilitar el input con un aviso ("Estás silenciado en este servidor") y volver a habilitarlo con el siguiente `PERMISSIONS_UPDATED`. Si puede escribir, el chat no manda nada al abrir: el valor inicial es `true`. |
+| W2 | **No reconectar después de un ban o una expulsión** | `chatSocket.ts` reconecta ante cualquier cierre. Con los códigos 4003 (baneado) y 4002 (expulsado o salió del servidor) tiene que dejar de reintentar y avisar; hoy se queda reintentando y cada intento recibe 403. En voz, `useVoiceRoom` muestra "Se perdió la conexión con el canal de voz" ante cualquier corte: usar el `DisconnectReason` de LiveKit (`PARTICIPANT_REMOVED`) para mostrar que lo sacaron del canal. |
 
 ## Mobile
 

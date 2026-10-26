@@ -97,8 +97,8 @@ flowchart LR
     AUTH & SR & NOTIF & PAY -->|5432 TLS| RDS
     CHAT --> ATLAS
     AUTH & SR -->|eventos outbox| RMQ
-    RMQ -->|member.*| CHAT
-    CHAT & VOICE -->|can-send / can-connect| SR
+    RMQ -->|member.*| CHAT & VOICE
+    CHAT & VOICE -->|access / can-connect| SR
     WEB & APK --> AUTH0
     EDGE & RT & INF -.->|docker pull| GHCR
 ```
@@ -242,7 +242,7 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 | Security Group | Puerto | Desde | Para qué |
 |---|---|---|---|
 | `discordia-edge` | 443/tcp | Rangos de Cloudflare | Kong (API y WebSockets) |
-| `discordia-edge` | 8002/tcp | grupo realtime | `can-send` / `can-connect` de Server-Roles (**temporal**) |
+| `discordia-edge` | 8002/tcp | grupo realtime | `access` / `can-connect` de Server-Roles (**temporal**) |
 | `discordia-realtime` | 3000, 8082, 3001/tcp | grupo edge | Kong → Chat, Voice, Notification |
 | `discordia-realtime` | 7880/tcp | grupo edge | Kong → señalización de LiveKit (`/livekit`) |
 | `discordia-realtime` | 7881/tcp, 7882/udp | 0.0.0.0/0 | Audio WebRTC (LiveKit valida su propio token) |
@@ -283,10 +283,11 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 | Kong | Auth, Server-Roles | HTTP | mismo nodo (`auth-service:8000`, `server-roles-service:8080`) |
 | Kong | Chat (REST y WS), Voice (REST y `/ws/voice`), Notification, LiveKit | HTTP / WebSocket | `REALTIME_HOST:3000/8082/3001/7880` |
 | Kong | Payments | HTTP | `INFRA_HOST:8003` |
-| Chat | Server-Roles `/internal/channels/{id}/can-send` | HTTP síncrono | `EDGE_HOST:8002` — al abrir cada WebSocket |
+| Chat | Server-Roles `/internal/channels/{id}/access` | HTTP síncrono | `EDGE_HOST:8002` — al abrir cada WebSocket y al pedir el historial |
 | Voice | Server-Roles `/internal/channels/{id}/can-connect` | HTTP síncrono (timeout + 3 reintentos) | `EDGE_HOST:8002` — al unirse a voz |
 | Auth / Server-Roles (workers) | RabbitMQ | AMQP (publica) | `INFRA_HOST:5672` |
 | Chat | RabbitMQ | AMQP (consume `member.*`) | `INFRA_HOST:5672` |
+| Voice | RabbitMQ | AMQP (consume `member.banned`, `member.kicked`, `member.left`) | `INFRA_HOST:5672` |
 | Voice | LiveKit | API de servidor | mismo nodo (`livekit:7880`) |
 | LiveKit | Voice `/webhooks/livekit` | Webhook HTTP | mismo nodo |
 | Prometheus | Exportadores de los 3 nodos | HTTP (scrape) | `<NODO>_HOST:9100/9180` |
@@ -331,6 +332,13 @@ que el cambio. Un worker aparte lo publica en RabbitMQ (al menos una vez; los co
 | Consumidor | Cola | Binding | Qué hace |
 |---|---|---|---|
 | Chat-Engine | `chat_engine_events` (durable) | `member.*` | ban / kick / salida → cierra el WebSocket; mute / unmute → habilita o bloquea el envío |
+| Voice-Signaling | `voice_signaling_events` (durable) | `member.banned`, `member.kicked`, `member.left` | Saca al usuario de la llamada de ese servidor y lo bloquea para que no vuelva a entrar con un token viejo |
+
+**Ver y escribir son permisos distintos** en el chat: `/internal/channels/{id}/access` responde 403 si el
+usuario no es miembro, está baneado o no tiene `VIEW_CHANNELS`. Si puede ver, devuelve `can_send`
+(`SEND_MESSAGES` y sin mute vigente) y `muted_until`. Un usuario muteado abre el canal y lee el historial,
+pero no puede escribir; al abrir el WebSocket recibe `{ "type": "PERMISSIONS_UPDATED", "canSend": false }`
+y, si el mute tiene vencimiento, el chat lo habilita solo cuando vence.
 
 ### Mensaje de chat y ban en vivo
 
@@ -346,9 +354,9 @@ sequenceDiagram
 
     U->>K: WSS /api/v1/chat/channels/{id}/ws
     K->>CH: WebSocket + X-User-Id
-    CH->>SR: GET /internal/channels/{id}/can-send
-    SR-->>CH: 200 + server_id
-    CH->>CH: registra la sesión (canSend = true)
+    CH->>SR: GET /internal/channels/{id}/access
+    SR-->>CH: 200 + server_id, can_send, muted_until
+    CH->>CH: registra la sesión (canSend según la respuesta)
     U->>CH: mensaje
     CH->>M: guarda
     CH-->>U: broadcast a los del canal
@@ -373,13 +381,24 @@ sequenceDiagram
     U->>K: POST /api/v1/voice/rooms/{id}/join
     K->>V: + X-User-Id
     V->>SR: can-connect (timeout 2 s, 3 intentos)
-    V-->>U: token de LiveKit + wss://api.discordia.lol/livekit
+    V-->>U: token de LiveKit (vence en 10 min) + wss://api.discordia.lol/livekit
     U->>K: WSS /livekit (señalización)
     K->>LK: :7880 (sin /livekit)
     U-->>LK: audio UDP 7882 directo a la Elastic IP (TCP 7881 de respaldo)
     LK->>V: webhook (alguien entró / salió)
     V-->>U: presencia por /ws/voice
+
+    Note over SR,V: Un admin banea o expulsa al usuario
+    SR->>V: member.banned / member.kicked (por RabbitMQ)
+    V->>LK: removeParticipant (si la llamada es de ese servidor)
+    V-->>U: presencia actualizada
 ```
+
+Voice guarda en Redis de qué servidor es cada llamada (`user:{id}:voice_server`, `channel:{id}:server`).
+Al recibir un ban, una expulsión o una salida, saca al usuario de la sala solo si la llamada es de ese
+servidor, y guarda un bloqueo (`voice:blocked:{servidor}:{usuario}`, 24 h). Si el usuario entra a una sala
+de ese servidor con un token emitido antes, el webhook `participant_joined` lo saca. El bloqueo se borra
+cuando vuelve a pasar por `/join` (que chequea `can-connect`).
 
 ---
 
@@ -460,7 +479,7 @@ volumen vacío). Si después se cambia el valor en `nodes.env`, hay que cambiarl
 | **infra** | Login, servidores, canales, chat y voz | Payments; eventos en vivo (bans y mutes se aplican al volver: quedan en la cola o en el outbox); métricas |
 | **realtime** | Login, servidores, canales, roles, Payments | Chat, voz, notificaciones |
 | **edge** | Nada desde afuera (es la única entrada) | Toda la API. Los WebSockets abiertos se cortan |
-| **RDS** | Chat ya abierto (mensajes en Atlas) y voz ya conectada | Login, servidores, canales, permisos (nuevos WebSockets y joins de voz fallan en `can-send` / `can-connect`), notificaciones y Payments |
+| **RDS** | Chat ya abierto (mensajes en Atlas) y voz ya conectada | Login, servidores, canales, permisos (nuevos WebSockets y joins de voz fallan en `access` / `can-connect`), notificaciones y Payments |
 | **S3** | Todo lo demás | Subir avatar y crear un servidor con ícono (503, sin dejar nada a medias); las imágenes no se ven |
 
 **El RDS es el punto único de falla de los datos relacionales.** Se aceptó a cambio de no administrar
@@ -608,5 +627,5 @@ curl -i localhost:8000/livez
 | Cloudflare proxy en `api` | DNS directo / Vercel rewrites | Oculta la IP, TLS gratis, anti-DDoS. Vercel no soporta WebSockets hacia afuera |
 | Compose por nodo + imágenes en GHCR | systemd por contenedor, ECS | Mismo archivo en local y producción; despliegue por servicio con `--no-deps` |
 | Redis local en cada nodo | Un Redis compartido en infra | Si cae infra, chat y presencia de voz siguen |
-| Sesión + eventos `member.*` (chat) | `can-send` en cada mensaje | Saca la llamada síncrona de cada mensaje |
+| Sesión + eventos `member.*` (chat) | `access` en cada mensaje | Saca la llamada síncrona de cada mensaje |
 | Exportadores expuestos solo a infra | Alloy + `remote_write` (ADR-O3) | Más simple para empezar.|

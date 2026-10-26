@@ -337,6 +337,9 @@ services:
       # Señalización por Kong. Producción: wss://api.discordia.lol/livekit
       - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL:-ws://localhost:8000/livekit}
       - CORE_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8002
+      # Eventos member.banned / kicked / left (nodo infra): saca al usuario de la llamada
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@${INFRA_HOST:-host.docker.internal}:5672/
+      - RABBITMQ_EXCHANGE=server.events
       - NODE_OPTIONS=--max-old-space-size=192
     depends_on:
       voice-redis:
