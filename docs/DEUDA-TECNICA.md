@@ -10,8 +10,8 @@ Al cerrar un ítem, borrarlo de acá (y mencionarlo en el PR).
 | Prioridad | Ítems | Por qué |
 |-----------|-------|---------|
 | **Alta** | R2 | Una dependencia sin fijar ya tiró un servicio |
-| **Media** | C1, V2, W1, W2, D1, D2, L1, L2, I1 | Permisos que no se actualizan en vivo, el cliente no muestra el mute ni el ban, usuario maestro compartido, TLS sin validar, archivos de ejemplo desactualizados, estado de Terraform en una sola máquina |
-| **Baja** | R1, P1, P2, V3, V4, C3, C4, M1, I2 | Payments todavía no tiene funcionalidad, mejoras de diseño, limpieza después del deploy, o solo hacen falta si el sistema crece |
+| **Media** | C1, V2, D1, D2, L1, L2, I1 | Permisos que no se actualizan en vivo, usuario maestro compartido, TLS sin validar, archivos de ejemplo desactualizados, estado de Terraform en una sola máquina |
+| **Baja** | R1, P1, P2, V3, V4, C3, C4, I2 | Payments todavía no tiene funcionalidad, mejoras de diseño, limpieza después del deploy, o solo hacen falta si el sistema crece |
 
 ---
 
@@ -104,21 +104,6 @@ Verificación: el CI de cada repo en verde y levantar `deploy/docker-compose.yml
 | I1 | Estado de Terraform en una sola máquina | `terraform.tfstate` es el registro de qué recursos de AWS y Cloudflare creó Terraform (IDs de la VPC, las EC2, el bucket, los Security Groups). Hoy está solo en la máquina de quien hizo el `apply` (está en `.gitignore`, bien, porque puede tener datos sensibles). Si se pierde, Terraform no sabe que esos recursos existen: el próximo `apply` intenta crearlos de nuevo y falla, o hay que importarlos uno por uno. Si otra persona aplica desde su máquina, parte de un estado vacío o viejo. `versions.tf` ya eligió HCP Terraform (bloque `cloud` comentado), falta activarlo: crear la organización `discordia-g12` y el workspace `discordia-prod` en app.terraform.io (plan Free), poner el workspace en *Execution mode: Local* (el `plan` y el `apply` siguen corriendo en tu máquina con tu perfil de AWS; HCP solo guarda el estado y lo bloquea mientras alguien aplica), descomentar el bloque, `terraform login`, `terraform init` (pregunta si migrar el estado local: sí), verificar que `terraform plan` no muestre cambios y recién ahí borrar el `terraform.tfstate` local. Actualizar el comentario de `versions.tf`, que todavía habla de tres cuentas. |
 | I2 | Tamaño del nodo realtime | Realtime es una `t3.micro` (1 GB) con Chat, Voice, LiveKit, Notification y dos Redis. Si LiveKit se queda sin memoria o CPU con varias llamadas, evaluar `t3.small` solo para ese nodo (`instance_type` es una sola variable para los tres: habría que separarla). Mirar el dashboard de cAdvisor antes de decidir. |
 
-## Clientes: permisos de chat y voz (en espera del refactor del WebApp)
-
-El backend ya los soporta; falta que la web y mobile los muestren (el código compartido está en `packages/core`).
-
-| # | Qué falta | Detalle |
-|---|-----------|---------|
-| W1 | **Mostrar que el usuario está silenciado** | Al abrir el WebSocket de un canal donde no puede escribir, el chat manda `{ "type": "PERMISSIONS_UPDATED", "canSend": false, "channelId" }`, y lo mismo con `canSend: true` cuando vence o se levanta el mute. Hoy `chatSocket.ts` descarta todo mensaje que no sea de chat, así que el muteado recién se entera cuando falla el envío (`{ error, status: 403 }`). Exponer el `canSend` en `useChatSocket`, deshabilitar el input con un aviso ("Estás silenciado en este servidor") y volver a habilitarlo con el siguiente `PERMISSIONS_UPDATED`. Si puede escribir, el chat no manda nada al abrir: el valor inicial es `true`. |
-| W2 | **No reconectar después de un ban o una expulsión** | `chatSocket.ts` reconecta ante cualquier cierre. Con los códigos 4003 (baneado) y 4002 (expulsado o salió del servidor) tiene que dejar de reintentar y avisar; hoy se queda reintentando y cada intento recibe 403. En voz, `useVoiceRoom` muestra "Se perdió la conexión con el canal de voz" ante cualquier corte: usar el `DisconnectReason` de LiveKit (`PARTICIPANT_REMOVED`) para mostrar que lo sacaron del canal. |
-
-## Mobile
-
-| # | Qué falta | Detalle |
-|---|-----------|---------|
-| M1 | Sacar `usesCleartextTraffic` | `apps/mobile/app.json` permite HTTP en Android. Hace falta para desarrollo (`http://10.0.2.2:8000`), pero en un build de release deja que la app hable sin cifrar si alguna URL quedó en `http://`. Ahora que todo va por `https://api.discordia.lol`, activarlo solo en el perfil de desarrollo (por ejemplo con `app.config.ts` según el perfil de EAS). |
-
 ---
 
 ## Imágenes (avatares e íconos de servidor)
@@ -128,13 +113,10 @@ Contexto: [ADR-003](../Auth-User-Service/docs/ADR-003-Avatares.md). Todas las im
 
 ### Clientes
 
-La web y mobile ya suben el ícono al crear un servidor y el avatar desde el perfil, como archivo, con la
-misma función de core (en iOS y Android el transporte es `XMLHttpRequest`, registrado con
-`configureClient({ sendForm })`), y usan la URL que devuelve la API. Queda:
-
-| # | Qué falta | Detalle |
-|---|-----------|---------|
-| F1 | Cambiar el ícono de un servidor existente | Depende de B3 (backend). Después, en Ajustes del servidor → Resumen (web y mobile), con el mismo selector que el modal de crear. |
+La web y mobile suben el ícono al crear un servidor, lo cambian o lo quitan desde Ajustes del servidor →
+Resumen, y suben el avatar desde el perfil. Todo va como archivo, con las mismas funciones de core (en iOS y
+Android el transporte es `XMLHttpRequest`, registrado con `configureClient({ sendForm })`), y la interfaz usa
+la URL que devuelve la API. No queda nada pendiente de imágenes en los clientes.
 
 ### Backend e infraestructura
 
@@ -142,8 +124,7 @@ misma función de core (en iOS y Android el transporte es `XMLHttpRequest`, regi
 |---|-----------|---------|
 | B1 | **Servir las imágenes a través de Cloudflare** | Hoy las URLs apuntan directo al bucket (`https://discordia-g12-media.s3.us-east-1.amazonaws.com/...`): cada vista es un GET que S3 cobra (requests + tráfico de salida) y el nombre del bucket queda expuesto. La idea es usar el mismo Cloudflare que ya administra `discordia.lol`: un subdominio proxied (ej. `media.discordia.lol`) delante del bucket, para que Cloudflare cachee las imágenes (son inmutables, `Cache-Control: immutable`) y S3 casi no reciba tráfico. Para que S3 acepte el pedido, el bucket tiene que llamarse igual que el host (`media.discordia.lol`, con website hosting) o hay que poner un Worker que reescriba el `Host`. En el código alcanza con cambiar `S3_PUBLIC_BASE_URL`. **Ojo:** las URLs ya guardadas en la base quedan con el dominio viejo y `delete_image` solo borra las del dominio actual: hay que migrarlas (un `UPDATE` con `replace`) en el mismo cambio. |
 | B2 | Subida directa con *presigned POST* | Hoy el archivo pasa por Kong y por el servicio. Con URLs firmadas el cliente subiría directo a S3, pero se pierde la validación real del contenido y la normalización a WebP (habría que hacerlas después, por ejemplo con un Lambda). Vale la pena solo si aparecen archivos más grandes (adjuntos de chat). |
-| B3 | Cambiar o quitar el ícono de un servidor existente | Solo se puede poner al crear. Falta `PATCH /servers/{id}/icon` (y `DELETE`) con chequeo de permisos (`MANAGE_SERVER` o dueño), borrar el ícono anterior y emitir `server.updated` por outbox. |
-| B4 | Borrar imágenes al eliminar servidor o cuenta | Todavía no hay endpoints de borrado de servidor ni de cuenta. Cuando existan, tienen que llamar a `delete_image` con el ícono y el avatar. |
+| B4 | Eliminar servidor (y borrar sus imágenes) | La web y mobile llaman a `DELETE /api/v1/servers/{id}` (`deleteServer` en core), pero Server-Roles **no tiene ese endpoint**: eliminar un servidor hoy falla. Al agregarlo (solo el dueño), borrar el ícono con `storage.delete_image` después del commit y emitir `server.deleted` por outbox. Lo mismo para el avatar cuando exista el borrado de cuenta en Auth. |
 | B5 | Restringir `avatar_url` en el alta y en `PATCH /profile` | `POST /api/v1/users/me` acepta cualquier URL (≤ 500 caracteres): se puede usar para tracking o contenido externo. `PATCH /api/v1/users/me/profile` también acepta `avatar_url`, **sin límite de largo**: una URL de más de 500 caracteres (por ejemplo un data URL, que es lo que mandaba la web antes) choca con la columna y da 500. Sacar `avatar_url` de `PATCH /profile` (el avatar se cambia solo con `PATCH /profile/avatar`) y, en el alta, restringirlo al bucket propio y a los dominios de Auth0 (`s.gravatar.com`, `lh3.googleusercontent.com`, `*.auth0.com`, etc.), o copiar la `picture` de Auth0 al bucket. |
 | B6 | Objetos huérfanos | Si un `delete_object` falla, el archivo queda en el bucket sin que nadie lo use (se loguea `s3_delete_failed`, no se reintenta). Con imágenes de ~20 KB el costo es despreciable; si crece, un job que compare el bucket contra la base. |
 | B7 | Límite de tamaño en Kong | `request-size-limiting` está en 50 MB global. Los servicios rechazan más de 5 MB, pero recién después de leer todo el archivo en memoria (hasta 50 MB por pedido en contenedores de 256 MB). Bajar el límite a ~6 MB en las rutas de subida. |
