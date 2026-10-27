@@ -1,0 +1,89 @@
+name: Deploy config
+
+# Despliega la configuración del orquestador (compose de los nodos, livekit/, rabbitmq/, observability) cuando
+# cambia en main. Entra a AWS con el mismo rol que deploy.yml y corre deploy/deploy-config.sh en los tres nodos
+# por SSM, en orden infra → realtime → edge. Si un nodo falla (y vuelve a su configuración anterior), los
+# siguientes no se tocan. Ver docs/TODO-CD.md (paso 5).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - deploy/**
+      - livekit/**
+      - rabbitmq/**
+      - observability # el puntero del submódulo
+      - "!deploy/README.md"
+      - "!deploy/*.example"
+  workflow_dispatch: # volver a aplicar main a mano (por ejemplo, después de arreglar un nodo)
+
+env:
+  AWS_REGION: us-east-1
+  CD_ROLE_ARN: arn:aws:iam::760144414058:role/discordia-cd # igual que en deploy.yml
+
+# Uno por vez, y sin cancelar uno que ya está cambiando un nodo
+concurrency:
+  group: deploy-config
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.CD_ROLE_ARN }}
+          role-session-name: deploy-config-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to infra, realtime and edge
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          # Corre el script tal como está en ese commit: el que está en el nodo puede ser viejo o no existir.
+          # Va a un archivo temporal porque el script mueve el repo, y con él su propio archivo.
+          cmd="export HOME=/root; set -e; g='git -c safe.directory=/opt/discordia -C /opt/discordia'
+          \$g fetch --quiet origin main
+          f=\$(mktemp); trap 'rm -f \$f' EXIT
+          \$g show $SHA:deploy/deploy-config.sh > \$f
+          bash \$f $SHA"
+
+          for node in infra realtime edge; do
+            echo "::group::$node"
+            ids=$(aws ec2 describe-instances \
+              --filters "Name=tag:Name,Values=discordia-$node" "Name=instance-state-name,Values=running" \
+              --query 'Reservations[].Instances[].InstanceId' --output text)
+            [ "$(wc -w <<< "$ids")" -eq 1 ] || { echo "::error::se esperaba una instancia discordia-$node corriendo, hay: '$ids'"; exit 1; }
+
+            id=$(aws ssm send-command \
+              --instance-ids "$ids" \
+              --document-name AWS-RunShellScript \
+              --comment "deploy config ${SHA:0:7} (run $GITHUB_RUN_ID)" \
+              --parameters "$(jq -n --arg c "$cmd" '{commands: [$c], executionTimeout: ["900"]}')" \
+              --query Command.CommandId --output text)
+            echo "discordia-$node: $ids · comando SSM $id"
+
+            # Igual que deploy.yml: "aws ssm wait" se corta a los 100 s
+            status=Pending
+            for _ in $(seq 180); do
+              sleep 5
+              status=$(aws ssm get-command-invocation --command-id "$id" --instance-id "$ids" \
+                --query Status --output text 2>/dev/null) || continue
+              case "$status" in Pending|InProgress|Delayed) ;; *) break ;; esac
+            done
+
+            aws ssm get-command-invocation --command-id "$id" --instance-id "$ids" --output json > result.json
+            jq -r .StandardOutputContent result.json
+            jq -r .StandardErrorContent result.json
+            echo "::endgroup::"
+
+            echo "- \`$node\`: $status (comando SSM \`$id\`)" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$status" != Success ]; then
+              echo "::error::configuración en $node: $status. Ver la salida del nodo; los nodos siguientes no se tocaron"
+              exit 1
+            fi
+          done
