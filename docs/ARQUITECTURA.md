@@ -451,7 +451,7 @@ volumen vacío). Si después se cambia el valor en `nodes.env`, hay que cambiarl
 | `/api/v1/voice`, `/ws/voice` | Voice-Signaling | JWT |
 | `/livekit` | LiveKit (señalización, sin el prefijo) | token propio de LiveKit |
 | `/api/v1/payments`, `/points`, `/boosts` | Payments | JWT + rate limit |
-| `/api/v1/notifications`, `/audit`, `/metrics`, `/status` | Notification | JWT (algunas solo staff) |
+| `/api/v1/notifications`, `/audit`, `/metrics`, `/status` | Notification | JWT (algunas solo staff, [ADR-002](../Gateway/docs/ADR-002-Rol-Staff-Backoffice.md)) |
 | `/livez`, `/readyz` | Kong | pública |
 
 - En producción (`deploy/gateway.env`): TLS con el Origin Certificate (`KONG_SSL_CERT`), `KONG_TRUSTED_IPS`
