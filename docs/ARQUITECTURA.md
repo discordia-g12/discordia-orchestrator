@@ -1,9 +1,10 @@
 # Arquitectura y despliegue de Discordia
 
-> Estado al 16/10/2026. Describe la arquitectura de tres nodos que reemplaza al monolito (una sola EC2 con
+> Estado al 28/10/2026. Describe la arquitectura de tres nodos que reemplaza al monolito (una sola EC2 con
 > `docker-compose.yml`), cómo se comunican los servicios, cómo se despliega y qué falta para el corte.
 > Cambio del 16/10: **una sola VPC** (antes una por nodo con peering) y **todas las bases en el RDS** (antes
 > un Postgres en contenedor por nodo).
+> Cambio del 27/10: **despliegue automático desde `main`** (CD por OIDC + SSM, sección 11).
 
 ## Índice
 
@@ -18,8 +19,7 @@
 9. [Resiliencia: qué pasa si se cae un nodo](#9-resiliencia-qué-pasa-si-se-cae-un-nodo)
 10. [Observabilidad](#10-observabilidad)
 11. [Despliegue](#11-despliegue)
-12. [Costos](#12-costos)
-13. [Decisiones y alternativas descartadas](#13-decisiones-y-alternativas-descartadas)
+12. [Decisiones y alternativas descartadas](#12-decisiones-y-alternativas-descartadas)
 
 ---
 
@@ -37,6 +37,7 @@
 | Audio de voz | **LiveKit** en realtime; el audio va directo por UDP 7882 (no pasa por Cloudflare) |
 | Avatares e íconos de servidor | **Bucket S3** `discordia-g12-media`: Auth y Server-Roles suben, los clientes leen directo del bucket ([ADR-003](../Auth-User-Service/docs/ADR-003-Avatares.md)) |
 | Imágenes de contenedores | Cada repo las publica en **GHCR** desde su CI (tag = SHA del commit) |
+| Despliegue | **Automático desde `main`**: el CI de cada servicio le ordena a su nodo, por **SSM**, que despliegue la imagen nueva, con healthcheck y rollback. GitHub entra a AWS por **OIDC**, sin claves guardadas |
 | Ejecución | **Un solo `deploy/docker-compose.yml`** con un *profile* por nodo; cada EC2 levanta el suyo |
 | Infraestructura | **Terraform** (`infra/terraform/`): VPC, subnets, Security Groups, EC2, bucket S3 y sus usuarios IAM, DNS y Pages. El RDS solo se **lee** (no lo administra) |
 | Observabilidad | Prometheus + Grafana en infra; Node Exporter + cAdvisor en los tres nodos |
@@ -451,7 +452,7 @@ volumen vacío). Si después se cambia el valor en `nodes.env`, hay que cambiarl
 | `/api/v1/voice`, `/ws/voice` | Voice-Signaling | JWT |
 | `/livekit` | LiveKit (señalización, sin el prefijo) | token propio de LiveKit |
 | `/api/v1/payments`, `/points`, `/boosts` | Payments | JWT + rate limit |
-| `/api/v1/notifications`, `/audit`, `/metrics`, `/status` | Notification | JWT (algunas solo staff) |
+| `/api/v1/notifications`, `/audit`, `/metrics`, `/status` | Notification | JWT (algunas solo staff, [ADR-002](../Gateway/docs/ADR-002-Rol-Staff-Backoffice.md)) |
 | `/livez`, `/readyz` | Kong | pública |
 
 - En producción (`deploy/gateway.env`): TLS con el Origin Certificate (`KONG_SSL_CERT`), `KONG_TRUSTED_IPS`
@@ -483,8 +484,7 @@ volumen vacío). Si después se cambia el valor en `nodes.env`, hay que cambiarl
 | **S3** | Todo lo demás | Subir avatar y crear un servidor con ícono (503, sin dejar nada a medias); las imágenes no se ven |
 
 **El RDS es el punto único de falla de los datos relacionales.** Se aceptó a cambio de no administrar
-Postgres en tres máquinas: AWS se ocupa de parches, backups y de reemplazar el hardware. Multi-AZ lo
-resolvería, pero duplica el costo del RDS.
+Postgres en tres máquinas.
 
 Mecanismos:
 
@@ -499,7 +499,7 @@ Mecanismos:
 
 **Dependencia síncrona que queda**: Chat y Voice consultan a Server-Roles (edge) al abrir un WebSocket o
 unirse a voz. Si edge cae, ya no importa (tampoco hay API). Se puede eliminar con la "foto de permisos por
-eventos" (pendiente, sección 14).
+eventos" (pendiente, P1 en `DEUDA-TECNICA.md`).
 
 ---
 
@@ -521,25 +521,141 @@ aws ssm start-session --target <id de infra> --document-name AWS-StartPortForwar
 
 ## 11. Despliegue
 
+Hay un solo entorno, **producción**, y se despliega solo desde `main`. `develop` integra y publica imágenes,
+pero no despliega. Un push a `main` de un servicio despliega ese servicio; un push a `main` del orquestador
+que toca la configuración (compose, LiveKit, RabbitMQ, observabilidad) la aplica en los tres nodos. Nadie
+entra a una EC2 para desplegar.
+
 ### Del commit al nodo
 
 ```mermaid
 flowchart LR
-    DEV[Push / merge a develop o main] --> CI[CI del repo<br/>lint + tests]
-    CI -->|pasa| IMG[docker build]
+    PR[PR a develop o main] --> TEST[CI: test]
+    TEST -->|pasa| IMG[CI: docker build]
     IMG -->|solo en push| GHCR[ghcr.io/discordia-g12/servicio<br/>tags: SHA y rama]
-    GHCR -->|docker compose pull| NODE[EC2 del nodo]
-    NODE --> UP[docker compose up -d --no-build]
+    GHCR -->|solo en push a main| DEP[CI: deploy<br/>workflow del orquestador]
+    DEP -->|OIDC| AWS[rol discordia-cd]
+    AWS -->|SSM send-command| NODE[EC2 del nodo<br/>deploy-service.sh]
+    NODE --> HC{healthy?}
+    HC -->|sí| OK[queda la versión nueva]
+    HC -->|no| RB[rollback al tag anterior<br/>y el job falla]
 ```
 
-- **CI por repo** (`.github/workflows/ci.yml`): en un PR solo construye la imagen; en push a `main` o
-  `develop`, además la publica en GHCR. Si los tests fallan, no se publica.
-- Etiquetas: **SHA completo del commit** (lo que se despliega, no cambia) y nombre de la rama. Sin `latest`.
-- Imágenes: `gateway`, `auth-service`, `server-roles-service`, `chat-engine-service`,
-  `voice-signaling-service`, `notification-service`, `payments-service`.
-- La SPA no usa imagen: la publica Cloudflare Pages.
+- **CI por repo** (`.github/workflows/ci.yml`), tres jobs encadenados con `needs`:
+  - `test` (`test-and-build` en Voice): lint, tests y análisis estático;
+  - `docker`: en un PR solo construye la imagen; en push a `main` o `develop`, además la publica en GHCR;
+  - `deploy`: solo en push a `main`, llama al workflow reutilizable del orquestador.
 
-### Un compose, tres nodos 
+  Si los tests fallan, no hay imagen, y sin imagen no hay deploy.
+- Etiquetas de la imagen: **SHA completo del commit** (40 caracteres: lo que se despliega, no cambia) y nombre
+  de la rama. Sin `latest`.
+- La SPA no usa imagen: Cloudflare Pages publica la web desde `main` de Discordia-WebApp.
+
+| Repo | Imagen | Nodo | Contenedores que reinicia |
+|---|---|---|---|
+| Gateway | `gateway` | edge | `gateway` |
+| Auth-User-Service | `auth-service` | edge | `auth-service`, `auth-outbox-worker` |
+| Server-Roles-Core-Service | `server-roles-service` | edge | `server-roles-service`, `server-roles-outbox-worker` |
+| Chat-Engine-Service | `chat-engine-service` | realtime | `chat-engine-service` |
+| Voice-Signaling-Session-Service | `voice-signaling-service` | realtime | `voice-signaling-service` |
+| Notification-Audit-Metrics-Service | `notification-service` | realtime | `notification-service` |
+| Payments-Monetization-Service | `payments-service` | infra | `payments-service` |
+
+### Deploy de un servicio
+
+```mermaid
+sequenceDiagram
+    participant CI as CI del servicio (main)
+    participant WF as deploy.yml (orquestador)
+    participant STS as AWS STS
+    participant SSM as AWS SSM
+    participant N as EC2 del nodo
+    CI->>WF: uses: ...deploy.yml@main (service, node, sha)
+    WF->>STS: token OIDC firmado por GitHub
+    STS-->>WF: credenciales temporales del rol discordia-cd (1 h)
+    WF->>SSM: describe-instances (tag Name=discordia-node) y send-command
+    SSM->>N: git pull + deploy-service.sh imagen sha
+    N->>N: pull de la imagen, cambio del tag, up --no-deps y espera a healthy
+    WF->>SSM: get-command-invocation (cada 5 s, hasta 15 min)
+    SSM-->>WF: Success, o Failed si hubo rollback
+```
+
+**Workflow reutilizable** (`.github/workflows/deploy.yml` del orquestador, `on: workflow_call`):
+
+1. Valida los inputs (`service`, `node`, `sha`). Entran al script por variables de entorno y no con `${{ }}`
+   dentro de `run`, para que no se puedan inyectar comandos.
+2. Pide credenciales con `aws-actions/configure-aws-credentials` y el rol `discordia-cd`. El ARN está fijo
+   en el workflow: no es un secreto, y una variable de organización necesita permisos de admin de la org.
+3. Busca la instancia por su tag `Name=discordia-<nodo>`, sin IDs fijos en el código. Si no hay exactamente
+   una corriendo, falla.
+4. Manda por SSM (`AWS-RunShellScript`) un `git pull` de `/opt/discordia`, para correr la versión del script
+   que está en `main`, y después `deploy-service.sh <imagen> <sha>`.
+5. Espera el resultado y muestra la salida del nodo en el log del job. No usa `aws ssm wait`, que se corta a
+   los 100 s. Si el comando no termina en `Success`, el job falla.
+
+Dos deploys del mismo repo no se pisan (`concurrency` por repo). Entre repos distintos, el lock lo pone el
+script en el nodo.
+
+**Script del nodo** (`deploy/deploy-service.sh`, corre como root):
+
+1. Valida que la imagen sea una de las siete, que corresponda a este nodo (`/etc/discordia/node-name`) y que
+   el SHA tenga 40 caracteres hexadecimales.
+2. Toma el lock del nodo (`flock`): los servicios de un mismo nodo comparten `nodes.env`.
+3. Baja la imagen nueva **antes** de tocar `nodes.env`. Si no existe en GHCR, no cambia nada.
+4. Guarda el tag anterior, escribe `<SERVICIO>_TAG=<sha>` en `nodes.env` y corre
+   `up -d --no-build --no-deps` solo con los contenedores de ese repo.
+5. Espera hasta 120 s (`HEALTH_TIMEOUT`) a que todos queden `healthy`. Si alguno no llega, muestra sus logs,
+   vuelve al tag anterior, lo levanta de nuevo y sale con error.
+6. Registra el resultado en `/var/log/discordia-deploy.log`: `ok`, `rolled-back`, `rollback-failed` o
+   `pull-failed`.
+
+Los healthchecks de los servicios en el compose usan `/readyz`: un servicio que arranca pero no llega a su base o a RabbitMQ
+no queda `healthy`, y el deploy vuelve atrás.
+
+### Deploy de la configuración
+
+`.github/workflows/deploy-config.yml` corre en push a `main` del orquestador cuando cambia `deploy/**`
+(salvo `README.md` y los `*.example`), `livekit/**`, `rabbitmq/**` o el puntero del submódulo
+`observability`. También se puede correr a mano (`workflow_dispatch`), por ejemplo después de arreglar un
+nodo.
+
+- Usa el mismo rol y el mismo mecanismo de SSM que el deploy de servicios.
+- Recorre los nodos en orden **infra → realtime → edge**. Si uno falla, los siguientes no se tocan.
+- En cada nodo corre `deploy/deploy-config.sh <sha>`, tomado del commit que se despliega (`git show`): el
+  que está en el nodo puede ser viejo.
+
+El script (`deploy/deploy-config.sh`):
+
+1. Verifica que `/opt/discordia` esté en `main`, sin cambios locales, y que el commit esté en `main`.
+2. Lleva el repo a ese commit (solo fast-forward) y actualiza el submódulo `observability`.
+3. Corre `up -d --no-build` de todo el nodo: Compose recrea los contenedores cuya definición cambió.
+4. Recrea a mano los que montan un archivo que cambió, porque Compose no se entera de eso: `livekit`,
+   `rabbitmq`, `prometheus` o `grafana`, y solo si son de ese nodo.
+5. Espera hasta 180 s a que todo el nodo quede `healthy` (o `running`, si no tiene healthcheck). Si no,
+   vuelve al commit anterior.
+6. Guarda el último commit aplicado en `/etc/discordia/config-sha`. No alcanza con el `HEAD` del repo: el
+   deploy de un servicio también hace `git pull`, y puede traer un `livekit.yaml` nuevo sin recrear
+   `livekit`.
+
+Comparte el lock y el log con `deploy-service.sh` (en el log aparece como `image=config`).
+
+### Seguridad del deploy
+
+- **Sin claves guardadas en GitHub.** GitHub Actions entra a AWS por **OIDC**: cada run recibe un token
+  firmado por GitHub y lo cambia por credenciales temporales de una hora.
+- **Sin SSH ni puerto 22.** El comando llega a la EC2 por **SSM**.
+- **El rol `discordia-cd` solo lo puede asumir `main`** de los repos de `local.cd_repos`: los siete servicios
+  y el orquestador. Es una lista explícita, así que la WebApp y `observability` no pueden desplegar.
+  GitHub firma el `sub` en formato inmutable (`repo:discordia-g12@<id org>/<repo>@<id repo>:ref:refs/heads/main`):
+  renombrar un repo no le da acceso a otro.
+- **Permisos mínimos:**
+  - `ssm:SendCommand`, solo sobre las tres instancias y el documento `AWS-RunShellScript`;
+  - `ssm:GetCommandInvocation`, `ssm:ListCommandInvocations` y `ec2:DescribeInstances` (no admiten
+    permisos por recurso).
+- Las EC2 bajan las imágenes de GHCR con un `docker login` de solo lectura (`read:packages`) y hacen
+  `git pull` con un credential store de root.
+
+### Un compose, tres nodos
 
 `deploy/docker-compose.yml` define los tres nodos. Qué se levanta lo decide `COMPOSE_PROFILES`:
 
@@ -553,19 +669,29 @@ Archivos:
 | Archivo | Para qué |
 |---|---|
 | `deploy/docker-compose.yml` | Servicios, redes por nodo, límites, healthchecks |
+| `deploy/deploy-service.sh` | Deploy de un servicio en su nodo (lo llama el CD) |
+| `deploy/deploy-config.sh` | Deploy de la configuración en un nodo (lo llama el CD) |
 | `deploy/.env.example` | Variables: local y la lista completa de producción por nodo |
 | `deploy/gateway.env.example` | Solo edge: TLS e IPs de confianza de Cloudflare |
-| `init-dbs.sql` (raíz) | Solo local: crea las cuatro bases en `local-postgres` |
 | `deploy/observability/prometheus.yml.tmpl` | Destinos de Prometheus |
+| `.github/workflows/deploy.yml` | Workflow reutilizable del deploy de servicios |
+| `.github/workflows/deploy-config.yml` | Deploy de la configuración |
+| `init-dbs.sql` (raíz) | Solo local: crea las cuatro bases en `local-postgres` |
 | `infra/terraform/` | Infraestructura (ver abajo) |
 
 ### Configuración de cada EC2
 
-- Código: `/opt/discordia` (clon del orquestador + submódulo `observability`).
-- Variables y secretos: `/etc/discordia/nodes.env` (permisos 600), con `COMPOSE_PROFILES`, `REGISTRY`, un
-  `<SERVICIO>_TAG` por servicio, `EDGE_HOST` / `REALTIME_HOST` / `INFRA_HOST`, el RDS (`DB_HOST`,
-  `DB_USER`, `DB_PASSWORD`; en realtime también `NOTIFICATION_DB_SSLMODE=no-verify`) y los secretos del nodo.
+- Código: `/opt/discordia`, un clon del orquestador en `main` con el submódulo `observability`.
+- Nombre del nodo: `/etc/discordia/node-name` (`edge`, `realtime` o `infra`; lo escribe cloud-init).
+- Variables y secretos: `/etc/discordia/nodes.env` (permisos 600). Contiene:
+  - `COMPOSE_PROFILES`, `REGISTRY` y un `<SERVICIO>_TAG` por servicio (lo actualiza el CD);
+  - `EDGE_HOST`, `REALTIME_HOST` e `INFRA_HOST`;
+  - el RDS (`DB_HOST`, `DB_USER`, `DB_PASSWORD`; en realtime también `NOTIFICATION_DB_SSLMODE=no-verify`);
+  - los secretos del nodo.
+
   Generar los secretos con `openssl rand -hex 32` (no `-base64`: sus `/ + =` rompen las URLs).
+- Estado del CD: `/etc/discordia/config-sha` (última configuración aplicada), `/var/log/discordia-deploy.log`
+  (historial de deploys) y `/var/lock/discordia-deploy.lock`.
 - Atajo para Compose: `/usr/local/bin/dcn` (no `dc`, que es una calculadora del sistema):
 
 ```bash
@@ -573,10 +699,37 @@ Archivos:
 exec docker compose -f /opt/discordia/deploy/docker-compose.yml --env-file /etc/discordia/nodes.env "$@"
 ```
 
-- Levantar un nodo: `dcn pull && dcn up -d --no-build && dcn ps`. Orden: **infra → realtime → edge**.
-- Desplegar un servicio solo: cambiar su `<SERVICIO>_TAG` en `nodes.env` y
-  `dcn pull <servicio> && dcn up -d --no-build --no-deps <servicio>`.
-- Si las imágenes son privadas: `docker login ghcr.io` con un token *classic* de solo `read:packages`.
+- Levantar un nodo desde cero: `dcn pull && dcn up -d --no-build && dcn ps`. Orden: **infra → realtime → edge**.
+
+### Operación
+
+| Necesito... | Cómo |
+|---|---|
+| Desplegar un servicio | Merge a `main` de su repo |
+| Desplegar la configuración | Merge a `main` del orquestador. Para volver a aplicarla: *Actions → Deploy config → Run workflow* |
+| Ver qué pasó en un deploy | El log del job `deploy` (trae la salida del nodo) o `/var/log/discordia-deploy.log` en el nodo |
+| Volver a una versión anterior | `git revert` en `main` del repo: el CD despliega el revert y `main` sigue reflejando lo que corre |
+| Desplegar a mano (emergencia) | En el nodo, por SSM: `sudo /opt/discordia/deploy/deploy-service.sh <imagen> <sha>`. El próximo push a `main` lo pisa |
+| Saber qué versión corre | `grep _TAG /etc/discordia/nodes.env` en el nodo, o `dcn ps` |
+
+Entrar a un nodo: `aws ssm start-session --target <id>` (`terraform output ssm_connect`). En un nodo cuyo
+`origin/main` está viejo, primero `git fetch` y después `git checkout -B main origin/main`: un
+`git checkout main` directo puede dejar un commit viejo del monolito.
+
+### Limitaciones conocidas
+
+- **`main` no está protegida.** La organización está en el plan Free y los repos son privados: GitHub no
+  permite protección de ramas ni rulesets. Mientras tanto, `deploy` depende de `test` y `docker` (`needs`):
+  un cambio con tests rotos no llega a producción, aunque el merge no quede bloqueado.
+- **El rollback es por healthcheck.** Detecta un servicio que no arranca o no está listo, no un error de
+  lógica: para eso está el `git revert`.
+- **Un rollback de configuración no cambia `main`.** El nodo vuelve al commit anterior, pero el próximo
+  `git pull` (por ejemplo, el deploy de un servicio) vuelve a traer el commit roto. Hay que corregirlo en
+  `main`.
+- **Sin despliegue sin corte.** Hay una sola instancia de cada servicio: mientras se recrea el contenedor (unos
+  segundos), ese servicio no responde. Los clientes reconectan el WebSocket solos.
+- **El estado de Terraform es local** (deuda I1 en `DEUDA-TECNICA.md`): el rol `discordia-cd` lo aplica
+  quien tiene el `terraform.tfstate`.
 
 ### Terraform
 
@@ -585,6 +738,7 @@ infra/terraform/
 ├── network.tf       VPC, Internet Gateway, subnet pública, subnets de datos, DB subnet group
 ├── security.tf      Security Group por nodo + RDS, y todas las reglas de entrada
 ├── main.tf          los 3 nodos, lectura del RDS (data source), budget, registro DNS api
+├── iam-cd.tf        proveedor OIDC de GitHub y rol discordia-cd para el deploy por SSM
 ├── pages.tf         proyecto de Cloudflare Pages + dominio app + CNAME
 ├── storage.tf       bucket S3 de imágenes, policy de lectura pública por prefijo, usuario IAM por servicio
 ├── providers.tf     AWS (un perfil) + Cloudflare
@@ -596,14 +750,15 @@ infra/terraform/
 - **El RDS no lo crea ni lo borra Terraform**: lo lee con un `data "aws_db_instance"` (para el endpoint) y
   crea el subnet group y el Security Group adonde se lo mueve. Moverlo es un comando aparte
   (`terraform output -raw rds_move_command`), así ningún `terraform destroy` puede borrar la base.
-
 - **Estado local** (`terraform.tfstate`, no se commitea): tiene que aplicarlo una sola persona y guardar
   una copia. Alternativa: HCP Terraform (bloque `cloud` comentado en `versions.tf`).
 - `manage_dns = false` hasta el corte: recién ahí Terraform administra `api` y `app`.
 - Un **budget de $1 sobre el gasto neto** (avisa si algo se cobra fuera de los créditos).
 - `terraform output`: IPs de cada nodo, comandos de SSM, `rds_endpoint`, `rds_move_command`,
-  `cloudflare_trusted_ips`, `media_bucket` (`S3_BUCKET` y `S3_PUBLIC_BASE_URL`) y
-  `media_access_key_commands` (crear o rotar las claves de cada servicio).
+  `cloudflare_trusted_ips`, `media_bucket` (`S3_BUCKET` y `S3_PUBLIC_BASE_URL`),
+  `media_access_key_commands` (crear o rotar las claves de cada servicio) y `cd_role_arn`.
+- Para sumar un repo que despliega: agregarlo con su ID a `cd_repos` (`locals.tf`) y aplicar
+  (`gh api repos/discordia-g12/<repo> -q .id`).
 
 ### Local (simular los tres nodos)
 
@@ -629,3 +784,5 @@ curl -i localhost:8000/livez
 | Redis local en cada nodo | Un Redis compartido en infra | Si cae infra, chat y presencia de voz siguen |
 | Sesión + eventos `member.*` (chat) | `access` en cada mensaje | Saca la llamada síncrona de cada mensaje |
 | Exportadores expuestos solo a infra | Alloy + `remote_write` (ADR-O3) | Más simple para empezar.|
+| CD por SSM + OIDC, disparado desde el CI de cada repo | SSH con una clave en los secrets (el `deploy.yml` del monolito); Watchtower; ECS | Sin claves de larga duración ni puerto 22; el rol solo lo asume `main` de repos conocidos. Watchtower despliega cualquier imagen nueva sin tests ni rollback y no deja rastro en GitHub. ECS cambiaría toda la ejecución (compose por nodo) y suma costo |
+| Workflow de deploy reutilizable en el orquestador | Copiarlo en cada repo; ponerlo en el repo `.github` de la org | Compose, scripts del nodo y workflow se versionan juntos; un cambio al deploy es un solo PR |
