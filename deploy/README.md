@@ -54,33 +54,65 @@ Para verificar el aislamiento entre redes: desde un contenedor de edge, un nombr
 (`docker compose -f deploy/docker-compose.yml exec auth-service python -c "import socket; socket.gethostbyname('rabbitmq')"`
 falla), pero `host.docker.internal:5672` sí responde.
 
-## Producción (en cada EC2)
+## Producción
 
-1. Entrar por SSM (`terraform output ssm_connect`) y clonar el orquestador con submódulos en `/opt/discordia`.
+### Despliegue automático (CD)
+
+No hace falta entrar a los nodos para desplegar:
+
+- **Un servicio:** al mergear a `main` de su repo, el CI corre los tests, publica
+  `ghcr.io/discordia-g12/<servicio>:<sha>` y llama a `.github/workflows/deploy.yml` (de este repo). Ese
+  workflow entra a AWS por OIDC y le ordena al nodo, por SSM, que corra `deploy-service.sh <imagen> <sha>`.
+- **La configuración** (`deploy/**`, `livekit/**`, `rabbitmq/**` o el submódulo `observability`): al
+  mergear a `main` de este repo, `.github/workflows/deploy-config.yml` corre `deploy-config.sh <sha>` en los
+  tres nodos, en orden infra → realtime → edge. Se puede volver a correr a mano desde *Actions → Deploy
+  config → Run workflow*.
+
+Los dos scripts esperan a que los contenedores queden `healthy`. Si no quedan, vuelven a la versión anterior
+y el job de GitHub falla. Cada deploy queda en `/var/log/discordia-deploy.log` del nodo. El detalle
+(seguridad, rollback, limitaciones) está en [`docs/ARQUITECTURA.md`, sección 11](../docs/ARQUITECTURA.md#11-despliegue).
+
+| Script | Uso | Qué hace |
+|---|---|---|
+| `deploy-service.sh` | `deploy-service.sh <imagen> <sha>` | Baja la imagen, cambia `<SERVICIO>_TAG` en `nodes.env` y recrea solo los contenedores de ese repo (`--no-deps`). Rollback al tag anterior si no queda `healthy` en 120 s |
+| `deploy-config.sh` | `deploy-config.sh <sha>` | Lleva `/opt/discordia` a ese commit de `main`, corre `up -d` del nodo y recrea los contenedores cuyos archivos montados cambiaron. Rollback al commit anterior si el nodo no queda sano en 180 s |
+
+Los dos corren como root, toman el mismo lock (un deploy por vez en cada nodo) y aceptan solo el SHA
+completo (40 caracteres).
+
+### Preparar un nodo nuevo (una sola vez)
+
+1. Entrar por SSM (`terraform output ssm_connect`) y clonar el orquestador en `main`, con submódulos, en
+   `/opt/discordia`. Root tiene que poder hacer `git pull` sin que le pidan credenciales.
 2. Crear `/etc/discordia/nodes.env` (permisos 600) con `COMPOSE_PROFILES=<nodo>`, las IPs privadas de los
-   otros nodos, el RDS (`DB_HOST`, `DB_USER`, `DB_PASSWORD`) y los secretos de ese nodo (lista completa en `.env.example`). **Todos los secretos tienen
-   que estar definidos**: los defaults del compose son solo para desarrollo.
-3. Solo edge: `deploy/gateway.env` (de `gateway.env.example`) y el Origin Certificate de Cloudflare en
+   otros nodos, el RDS (`DB_HOST`, `DB_USER`, `DB_PASSWORD`), un `<SERVICIO>_TAG` por servicio del nodo y
+   los secretos de ese nodo (lista completa en `.env.example`). **Todos los secretos tienen que estar
+   definidos**: los defaults del compose son solo para desarrollo. El CD necesita que cada `<SERVICIO>_TAG`
+   exista, porque guarda el anterior para el rollback.
+3. Verificar `/etc/discordia/node-name` (`edge`, `realtime` o `infra`; lo escribe cloud-init): el script de
+   deploy rechaza una imagen de otro nodo.
+4. Los paquetes de GHCR son privados: `docker login ghcr.io` como root, con un token de GitHub de solo
+   lectura (`read:packages`).
+5. Solo edge: `deploy/gateway.env` (de `gateway.env.example`) y el Origin Certificate de Cloudflare en
    `deploy/tls/` (`origin.pem`, `origin.key`).
-4. Levantar en orden (infra → realtime → edge). En el servidor no se construye nada: se bajan las imágenes
-   que publicó el CI de cada repo en GHCR (`REGISTRY` y un `<SERVICIO>_TAG` por servicio en `nodes.env`):
+6. Levantar en orden (infra → realtime → edge). En el servidor no se construye nada: se bajan las imágenes
+   que publicó el CI de cada repo en GHCR:
    ```bash
    C="docker compose -f /opt/discordia/deploy/docker-compose.yml --env-file /etc/discordia/nodes.env"
    $C pull
    $C up -d --no-build
    ```
 
-## Desplegar un servicio solo
+### A mano (emergencias)
 
-Cada push a `main`/`develop` de un repo publica `ghcr.io/discordia-g12/<servicio>:<sha>` (y `:<rama>`).
-Para desplegar esa versión, en la EC2 de su nodo: cambiar su `<SERVICIO>_TAG` en `nodes.env` por el SHA y
+Desde una sesión de SSM en el nodo:
 
 ```bash
-$C pull auth-service
-$C up -d --no-build --no-deps auth-service
+sudo /opt/discordia/deploy/deploy-service.sh auth-service <sha de 40 caracteres>   # un servicio
+sudo /opt/discordia/deploy/deploy-config.sh <sha de main>                           # la configuración
+tail /var/log/discordia-deploy.log                                                  # qué se desplegó
 ```
 
-Los demás servicios no se tocan. Para volver atrás, el SHA anterior.
-
-Los paquetes de GHCR son privados, la EC2 necesita `docker login ghcr.io` con un token de GitHub de
-solo lectura (`read:packages`). 
+Un deploy a mano queda pisado por el próximo push a `main` de ese repo. Para volver atrás de forma
+duradera, hacer `git revert` en `main`: el CD despliega el revert. Si el `origin/main` del nodo está viejo,
+primero `git fetch` y después `git checkout -B main origin/main`.
