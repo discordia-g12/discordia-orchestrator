@@ -8,7 +8,8 @@
 # Pasos: lleva /opt/discordia a ese commit (fast-forward), actualiza el submódulo observability, corre
 # "up -d" de todo el nodo (Compose recrea solo los contenedores cuya definición cambió), recrea a mano los que
 # montan un archivo que cambió (Compose no se entera de eso) y espera a que todo el nodo quede sano. Si no queda,
-# vuelve al commit anterior. Comparte lock y log con deploy-service.sh. Ver docs/TODO-CD.md (paso 5).
+# vuelve al commit anterior. Comparte lock y log con deploy-service.sh.
+# Ver docs/ARQUITECTURA.md, sección 11 ("Deploy de la configuración").
 set -euo pipefail
 
 REPO=/opt/discordia

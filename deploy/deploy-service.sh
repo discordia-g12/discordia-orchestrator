@@ -6,7 +6,8 @@
 #
 # Pasos: valida, baja la imagen, cambia <SERVICIO>_TAG en nodes.env, recrea solo los contenedores de ese
 # repo (--no-deps) y espera a que todos queden healthy. Si alguno no llega, restaura el tag anterior.
-# Cada deploy queda en /var/log/discordia-deploy.log. Ver docs/TODO-CD.md (paso 2).
+# Cada deploy queda en /var/log/discordia-deploy.log.
+# Ver docs/ARQUITECTURA.md, sección 11 ("Deploy de un servicio").
 set -euo pipefail
 
 COMPOSE_FILE=/opt/discordia/deploy/docker-compose.yml
@@ -89,7 +90,7 @@ main() {
   log "$IMAGE en $NODE: ${PREV_TAG} → ${SHA}"
 
   # El compose actualizado. Si falla (red, credenciales), se despliega con el que ya está: la configuración
-  # tiene su propio deploy (paso 5 de TODO-CD.md).
+  # tiene su propio deploy (deploy-config.sh).
   git -c safe.directory=/opt/discordia -C /opt/discordia pull --ff-only --quiet \
     || log "aviso: no se pudo actualizar /opt/discordia, sigo con el compose actual"
 
