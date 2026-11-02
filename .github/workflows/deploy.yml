@@ -2,7 +2,8 @@ name: Deploy
 
 # Workflow reutilizable: lo llama el job "deploy" del CI de cada servicio después de publicar la imagen.
 # Entra a AWS por OIDC con el rol discordia-cd (sin claves guardadas en GitHub) y le ordena al nodo, por SSM,
-# que corra deploy/deploy-service.sh. Si el deploy falla o hace rollback, este job falla. Ver docs/TODO-CD.md.
+# que corra deploy/deploy-service.sh. Si el deploy falla o hace rollback, este job falla.
+# Ver docs/ARQUITECTURA.md, sección 11 ("Deploy de un servicio").
 #
 #   deploy:
 #     needs: docker

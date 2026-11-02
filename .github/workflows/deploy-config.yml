@@ -3,7 +3,8 @@ name: Deploy config
 # Despliega la configuración del orquestador (compose de los nodos, livekit/, rabbitmq/, observability) cuando
 # cambia en main. Entra a AWS con el mismo rol que deploy.yml y corre deploy/deploy-config.sh en los tres nodos
 # por SSM, en orden infra → realtime → edge. Si un nodo falla (y vuelve a su configuración anterior), los
-# siguientes no se tocan. Ver docs/TODO-CD.md (paso 5).
+# siguientes no se tocan.
+# Ver docs/ARQUITECTURA.md, sección 11 ("Deploy de la configuración").
 
 on:
   push:

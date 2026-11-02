@@ -110,6 +110,15 @@ variable "auth0_client_id" {
   default     = "f2H8PhlKDl3KSIm64G5mHAeQih7iFyIP"
 }
 
+variable "auth0_backoffice_client_id" {
+  description = <<-EOT
+    Client ID de la aplicación "Discordia Backoffice" en Auth0 (SPA aparte de la web, valor público). Vacío, el
+    backoffice publicado muestra el error de configuración en vez del login
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "auth0_audience" {
   description = "Audience de la API en Auth0"
   type        = string

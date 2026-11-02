@@ -1,6 +1,7 @@
 # CD: GitHub Actions entra a AWS por OIDC y le ordena a cada nodo, por SSM, que despliegue la imagen nueva.
 # No hay claves de AWS ni claves SSH guardadas en GitHub: cada job pide credenciales temporales (1 h) con el
-# token OIDC que GitHub firma para ese run. Ver docs/TODO-CD.md.
+# token OIDC que GitHub firma para ese run.
+# Ver docs/ARQUITECTURA.md, sección 11 ("Seguridad del deploy").
 
 data "aws_caller_identity" "current" {}
 

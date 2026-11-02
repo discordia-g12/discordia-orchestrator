@@ -7,5 +7,8 @@ budget_alert_email    = "equipo@ejemplo.com"
 cloudflare_zone_id    = "<zone id de discordia.lol>"
 cloudflare_account_id = "<account id de Cloudflare>"
 
+# Aplicación "Discordia Backoffice" de Auth0 (backoffice.discordia.lol)
+auth0_backoffice_client_id = "<client id de la app Discordia Backoffice>"
+
 # Recién en el corte: Terraform pasa a administrar api.discordia.lol y app.discordia.lol
 manage_dns = false
