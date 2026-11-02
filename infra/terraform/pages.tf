@@ -41,6 +41,8 @@ resource "cloudflare_pages_project" "webapp" {
         VITE_AUTH0_DOMAIN    = var.auth0_domain
         VITE_AUTH0_CLIENT_ID = var.auth0_client_id
         VITE_AUTH0_AUDIENCE  = var.auth0_audience
+        # Link "backoffice" del menú de usuario (solo lo ve el staff)
+        VITE_BACKOFFICE_URL = "https://${local.backoffice_domain}"
       }
     }
   }
@@ -65,4 +67,71 @@ resource "cloudflare_record" "app" {
   content = cloudflare_pages_project.webapp.subdomain
   proxied = true
   comment = "SPA en Cloudflare Pages. Administrado por Terraform"
+}
+
+# ---------- Backoffice del staff (apps/backoffice del mismo repo) ----------
+# Otro proyecto de Pages sobre el mismo repo, con su propio dominio (Gateway/docs/ADR-002-Rol-Staff-Backoffice.md):
+# no comparte origen con la web. Compila en cada push a la rama de producción, igual que la web.
+
+locals {
+  backoffice_domain = "backoffice.discordia.lol"
+}
+
+resource "cloudflare_pages_project" "backoffice" {
+  account_id        = var.cloudflare_account_id
+  name              = "discordia-backoffice"
+  production_branch = var.webapp_production_branch
+
+  source {
+    type = "github"
+    config {
+      owner                         = var.webapp_github_owner
+      repo_name                     = var.webapp_github_repo
+      production_branch             = var.webapp_production_branch
+      production_deployment_enabled = true
+      deployments_enabled           = true
+      pr_comments_enabled           = false
+      # Sin previews: Auth0 no tiene sus URLs permitidas
+      preview_deployment_setting = "none"
+    }
+  }
+
+  build_config {
+    build_command   = "npm run build:backoffice"
+    destination_dir = "apps/backoffice/dist"
+    root_dir        = ""
+    build_caching   = true
+  }
+
+  deployment_configs {
+    production {
+      # Valores públicos (van en el bundle). El client ID es el de la aplicación "Discordia Backoffice" de Auth0,
+      # no el de la web
+      environment_variables = {
+        NODE_VERSION         = "22"
+        VITE_API_URL         = var.api_public_url
+        VITE_AUTH0_DOMAIN    = var.auth0_domain
+        VITE_AUTH0_CLIENT_ID = var.auth0_backoffice_client_id
+        VITE_AUTH0_AUDIENCE  = var.auth0_audience
+        VITE_APP_URL         = "https://app.discordia.lol"
+        # Grafana no está publicado: se abre con el port forwarding de SSM (docs/ARQUITECTURA.md, sección 10)
+        VITE_GRAFANA_URL = "http://localhost:3030"
+      }
+    }
+  }
+}
+
+resource "cloudflare_pages_domain" "backoffice" {
+  account_id   = var.cloudflare_account_id
+  project_name = cloudflare_pages_project.backoffice.name
+  domain       = local.backoffice_domain
+}
+
+resource "cloudflare_record" "backoffice" {
+  zone_id = var.cloudflare_zone_id
+  name    = "backoffice"
+  type    = "CNAME"
+  content = cloudflare_pages_project.backoffice.subdomain
+  proxied = true
+  comment = "Backoffice del staff en Cloudflare Pages. Administrado por Terraform"
 }

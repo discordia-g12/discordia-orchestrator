@@ -30,7 +30,7 @@
 | Cómputo | 3 EC2 (`t3.micro`), una por nodo: **edge**, **realtime**, **infra** |
 | Red | **Una VPC** (`10.0.0.0/16`), una cuenta de AWS. Un **Security Group por nodo** + uno para el RDS. IPs privadas fijas |
 | Entrada de la API | `api.discordia.lol` → **Cloudflare** (proxy, TLS) → **Kong** en edge (443, solo IPs de Cloudflare) |
-| Frontend | SPA en **Cloudflare Pages** (`app.discordia.lol`) |
+| Frontend | SPA en **Cloudflare Pages** (`app.discordia.lol`) y backoffice del staff, otro proyecto de Pages (`backoffice.discordia.lol`, [ADR-002](../Gateway/docs/ADR-002-Rol-Staff-Backoffice.md)) |
 | Bases relacionales | **Un RDS** (`discordia-db-cluster`, Postgres 18, `db.t4g.micro`) con una base por servicio. Ningún nodo corre Postgres |
 | Historial del chat | **MongoDB Atlas M0** |
 | Mensajería | **RabbitMQ** en infra; eventos publicados con el patrón **Outbox** |
@@ -57,6 +57,7 @@ flowchart LR
         DNS[DNS discordia.lol]
         PROXY[Proxy + TLS<br/>api.discordia.lol]
         PAGES[Pages<br/>app.discordia.lol]
+        BO[Pages<br/>backoffice.discordia.lol]
     end
 
     subgraph VPC[VPC 10.0.0.0/16]
@@ -88,6 +89,7 @@ flowchart LR
     GHCR[GHCR<br/>imágenes]
 
     WEB -->|HTTPS| PAGES
+    WEB -->|HTTPS, solo staff| BO
     WEB & APK -.->|GET imágenes| S3
     AUTH & SR -->|PUT / DELETE| S3
     WEB & APK -->|HTTPS / WSS| PROXY --> KONG
@@ -185,7 +187,7 @@ imágenes directo desde la URL del bucket, sin pasar por Kong.
 
 | Servicio | Plan | Para qué |
 |---|---|---|
-| Cloudflare | Free | DNS, proxy y TLS de la API, Pages (SPA) |
+| Cloudflare | Free | DNS, proxy y TLS de la API, Pages (SPA y backoffice) |
 | Amazon S3 | (misma cuenta de AWS, fuera de la VPC) | Avatares e íconos de servidor |
 | MongoDB Atlas | M0 | Historial del chat |
 | Auth0 | (existente) | Identidad: login, tokens |
@@ -258,6 +260,7 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 |---|---|---|---|
 | `api` | A | Elastic IP de edge | **Proxied** (nube naranja) |
 | `app` | CNAME | `discordia-webapp.pages.dev` | Proxied |
+| `backoffice` | CNAME | `discordia-backoffice.pages.dev` | Proxied |
 
 - TLS público lo da Cloudflare; entre Cloudflare y Kong, **Origin Certificate** (modo **Full (strict)**).
 - Kong solo acepta a Cloudflare (Security Group) y toma la IP real del usuario del header
@@ -466,6 +469,10 @@ volumen vacío). Si después se cambia el valor en `nodes.env`, hay que cambiarl
 - **Web**: Cloudflare Pages compila `Discordia-WebApp` en cada push a `main` (`npm run build`, Node 22) y
   sirve `dist/`. Variables de build: `VITE_API_URL=https://api.discordia.lol` y `VITE_AUTH0_*` (públicas).
   Sin previews por PR (apuntarían a la API de producción). Headers de seguridad y caché en `public/_headers`.
+- **Backoffice**: otro proyecto de Pages (`discordia-backoffice`) sobre el mismo repo: compila
+  `npm run build:backoffice` y sirve `apps/backoffice/dist` en `backoffice.discordia.lol`. Usa su propia
+  aplicación de Auth0 (`VITE_AUTH0_CLIENT_ID` = variable `auth0_backoffice_client_id` de Terraform) y headers
+  más estrictos (`apps/backoffice/public/_headers`). Solo entra el staff ([ADR-002](../Gateway/docs/ADR-002-Rol-Staff-Backoffice.md)).
 - **Mobile**: `eas.json` fija `EXPO_PUBLIC_API_URL=https://api.discordia.lol` en los perfiles `preview` y
   `production`.
 - **Reconexión**: la web (`useChatWebSocket`) y mobile (`useChannelSocket`) se reconectan solas con backoff
@@ -739,7 +746,7 @@ infra/terraform/
 ├── security.tf      Security Group por nodo + RDS, y todas las reglas de entrada
 ├── main.tf          los 3 nodos, lectura del RDS (data source), budget, registro DNS api
 ├── iam-cd.tf        proveedor OIDC de GitHub y rol discordia-cd para el deploy por SSM
-├── pages.tf         proyecto de Cloudflare Pages + dominio app + CNAME
+├── pages.tf         proyectos de Cloudflare Pages (web y backoffice) + dominios app y backoffice + CNAME
 ├── storage.tf       bucket S3 de imágenes, policy de lectura pública por prefijo, usuario IAM por servicio
 ├── providers.tf     AWS (un perfil) + Cloudflare
 ├── variables.tf · locals.tf · outputs.tf · versions.tf
