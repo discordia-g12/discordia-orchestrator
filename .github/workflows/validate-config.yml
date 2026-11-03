@@ -1,0 +1,47 @@
+name: Validate config
+
+# Valida la configuración que despliega deploy-config.yml antes de que llegue a main. Hace falta porque la
+# observabilidad es opcional en el deploy (un Prometheus que no arranca no revierte el nodo): un error en la
+# plantilla tiene que frenarse acá. Las reglas de alerta se validan en el CI del submódulo observability.
+# Ver docs/ARQUITECTURA.md, sección 11.
+
+on:
+  pull_request:
+    paths:
+      - deploy/**
+      - .github/workflows/validate-config.yml
+  push:
+    branches: [develop]
+    paths:
+      - deploy/**
+      - .github/workflows/validate-config.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4 # sin submódulos: observability es privado y el compose no los necesita para validar
+
+      - name: Compose
+        run: |
+          # Los montajes del submódulo no se resuelven en config: alcanza con que el archivo sea válido
+          cp deploy/.env.example deploy/.env
+          docker compose -f deploy/docker-compose.yml config -q
+
+      - name: Prometheus template
+        run: |
+          # Mismo reemplazo que el entrypoint del servicio prometheus, con IPs de producción
+          mkdir -p "$RUNNER_TEMP/prom"
+          sed -e 's|__EDGE_HOST__|10.0.1.10|g' -e 's|__REALTIME_HOST__|10.0.1.20|g' \
+            -e 's|__INFRA_HOST__|10.0.1.30|g' -e 's|__ENVIRONMENT__|production|g' \
+            deploy/observability/prometheus.yml.tmpl > "$RUNNER_TEMP/prom/prometheus.yml"
+          if grep -n '__[A-Z_]*__' "$RUNNER_TEMP/prom/prometheus.yml"; then
+            echo "Quedaron placeholders sin completar" >&2
+            exit 1
+          fi
+          docker run --rm -v "$RUNNER_TEMP/prom:/cfg:ro" --entrypoint promtool \
+            prom/prometheus:v2.53.0 check config /cfg/prometheus.yml

@@ -4,7 +4,7 @@ Un solo compose (`deploy/docker-compose.yml`) para los tres nodos, igual en loca
 
 | Nodo (profile) | Red | Servicios | Puertos publicados (para los otros nodos) |
 |---|---|---|---|
-| `edge` | `edge` | Kong + Redis, Auth (+worker), Server-Roles (+worker) | 443/8443 (Kong), 8002 (Server-Roles internal) |
+| `edge` | `edge` | Kong + Redis, Auth (+worker), Server-Roles (+worker) | 443/8443 (Kong), 8002 (Server-Roles internal), 8100 (métricas de Kong, solo para infra) |
 | `realtime` | `realtime` | Chat + Redis, Voice + Redis, LiveKit, Notification | 3000, 8082, 3001, 7880, 7881, 7882/udp |
 | `infra` | `infra` | RabbitMQ, Payments, Prometheus, Grafana | 5672, 8003 |
 | los tres | (default) | Node Exporter, cAdvisor (métricas de la máquina y de sus contenedores) | 9100, 9180 (solo para infra) |
@@ -14,12 +14,34 @@ Un solo compose (`deploy/docker-compose.yml`) para los tres nodos, igual en loca
 `payments_db` (infra). En local, el profile `local` levanta un Postgres que hace de RDS en el 5432 del host
 (crea las bases con `init-dbs.sql`) y los servicios le llegan por `host.docker.internal:5432`.
 
-**Observabilidad:** Prometheus (infra) lee los exportadores de los tres nodos por IP:puerto
-(`observability/prometheus.yml.tmpl`) y Grafana usa los dashboards del submódulo `observability`.
+**Observabilidad:** Prometheus (infra) lee por IP:puerto los exportadores de los tres nodos y las métricas
+de Kong (8100), según `observability/prometheus.yml.tmpl`. Grafana usa los dashboards del submódulo
+`observability`, ordenados por nivel (Overview → Recursos → Comportamiento). Las reglas de alerta también
+salen del submódulo (`observability/prometheus/rules/`) y se ven en Prometheus (*Alerts*) y en el Overview:
+no hay Alertmanager.
 Los paneles quedan en el host: Grafana en `http://localhost:3030` (usuario `admin`, contraseña
 `GRAFANA_ADMIN_PASSWORD`; en local `dev-grafana`) y Prometheus en `http://localhost:9090` (*Status →
 Targets*). En producción se entra por port forwarding de SSM:
 `aws ssm start-session --target <id de infra> --document-name AWS-StartPortForwardingSession --parameters portNumber=3030,localPortNumber=3030`.
+
+- En local los tres `*_HOST` son el mismo, así que Prometheus deja un solo target por exportador con
+  `node=local` (si no, cada serie aparecería tres veces).
+- Prometheus, Grafana, Node Exporter y cAdvisor llevan el label `discordia.deploy.optional`: si no quedan
+  sanos, `deploy-config.sh` lo avisa en el log pero no revierte el nodo. Por eso la plantilla se valida
+  antes, en el CI (`.github/workflows/validate-config.yml`, con `promtool`).
+
+**Estado de la plataforma:** Notification (realtime) sondea los `/readyz` de todos los servicios a través de
+Kong, por las rutas `/internal/readyz/*`, que solo aceptan IPs privadas. La URL de Kong es
+`STATUS_GATEWAY_URL` (en local `https://host.docker.internal:8443`, en `.env.example`). Sin ella, esos
+servicios quedan "Sin datos". El backoffice lo consume en `/api/v1/admin/status` (solo staff).
+
+En producción, orden de puesta en marcha:
+
+1. `terraform apply` con las reglas edge 443 desde realtime y edge 8100 desde infra.
+2. `KONG_STATUS_BIND=0.0.0.0` en el `nodes.env` de edge y deploy del Gateway (con `/internal/readyz/*`).
+3. Recién entonces, `STATUS_GATEWAY_URL=https://10.0.1.10:443` en el `nodes.env` de realtime.
+
+Si se agrega antes, el estado público muestra una caída falsa.
 
 **Cada nodo tiene su propia red de Docker.** Los contenedores de un nodo se ven por nombre entre ellos,
 pero no ven los de otro nodo: lo que cruza de un nodo a otro va a la IP del host y al puerto publicado,
@@ -75,7 +97,7 @@ y el job de GitHub falla. Cada deploy queda en `/var/log/discordia-deploy.log` d
 | Script | Uso | Qué hace |
 |---|---|---|
 | `deploy-service.sh` | `deploy-service.sh <imagen> <sha>` | Baja la imagen, cambia `<SERVICIO>_TAG` en `nodes.env` y recrea solo los contenedores de ese repo (`--no-deps`). Rollback al tag anterior si no queda `healthy` en 120 s |
-| `deploy-config.sh` | `deploy-config.sh <sha>` | Lleva `/opt/discordia` a ese commit de `main`, corre `up -d` del nodo y recrea los contenedores cuyos archivos montados cambiaron. Rollback al commit anterior si el nodo no queda sano en 180 s |
+| `deploy-config.sh` | `deploy-config.sh <sha>` | Lleva `/opt/discordia` a ese commit de `main`, corre `up -d` del nodo y recrea los contenedores cuyos archivos montados cambiaron. Rollback al commit anterior si el nodo no queda sano en 180 s (los servicios con `discordia.deploy.optional=true` solo generan un aviso) |
 
 Los dos corren como root, toman el mismo lock (un deploy por vez en cada nodo) y aceptan solo el SHA
 completo (40 caracteres).

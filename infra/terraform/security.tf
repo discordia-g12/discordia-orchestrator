@@ -31,6 +31,8 @@ locals {
     [
       # Temporal: Chat y Voice consultan can-send / can-connect hasta tener la foto de permisos por eventos
       { sg = "edge", port = 8002, protocol = "tcp", from = "realtime", cidr = null, description = "Server-Roles internal desde realtime" },
+      # Notification arma el estado de la plataforma sondeando /internal/readyz/* de Kong (solo IPs privadas)
+      { sg = "edge", port = 443, protocol = "tcp", from = "realtime", cidr = null, description = "Kong readyz internos desde Notification" },
 
       { sg = "realtime", port = 3000, protocol = "tcp", from = "edge", cidr = null, description = "Chat-Engine desde Kong" },
       { sg = "realtime", port = 8082, protocol = "tcp", from = "edge", cidr = null, description = "Voice-Signaling desde Kong" },
@@ -47,6 +49,7 @@ locals {
       # Prometheus (infra) lee Node Exporter y cAdvisor de los otros nodos
       { sg = "edge", port = 9100, protocol = "tcp", from = "infra", cidr = null, description = "Node Exporter para Prometheus" },
       { sg = "edge", port = 9180, protocol = "tcp", from = "infra", cidr = null, description = "cAdvisor para Prometheus" },
+      { sg = "edge", port = 8100, protocol = "tcp", from = "infra", cidr = null, description = "Metricas de Kong para Prometheus" },
       { sg = "realtime", port = 9100, protocol = "tcp", from = "infra", cidr = null, description = "Node Exporter para Prometheus" },
       { sg = "realtime", port = 9180, protocol = "tcp", from = "infra", cidr = null, description = "cAdvisor para Prometheus" },
 
