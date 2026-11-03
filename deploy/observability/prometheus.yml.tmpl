@@ -2,6 +2,10 @@
 # cada nodo). Plantilla: __EDGE_HOST__, __REALTIME_HOST__, __INFRA_HOST__ y __ENVIRONMENT__ se completan
 # al arrancar el contenedor (ver el servicio prometheus en deploy/docker-compose.yml).
 # Basado en observability/prometheus/prometheus.yml (un solo host): mismas reglas de relabel.
+#
+# Las líneas que terminan en "# multinodo" se borran si los tres hosts son el mismo (local): sin eso cada
+# exportador se leería tres veces y los paneles que suman por servicio mostrarían el triple. En ese caso
+# todos los targets quedan con node=local.
 
 global:
   scrape_interval: 15s
@@ -10,40 +14,56 @@ global:
   external_labels:
     env: __ENVIRONMENT__
 
+# Reglas de alerta del submódulo observability (montadas en /etc/prometheus/rules). Con glob: si no hay
+# archivos, la config sigue siendo válida (así la valida el CI sin el submódulo).
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
 scrape_configs:
   - job_name: prometheus
     static_configs:
       - targets: ['localhost:9090']
+        labels: { node: infra }
 
   # cAdvisor: CPU, memoria, red y disco de cada contenedor. El label node dice de qué máquina viene.
   - job_name: cadvisor
     static_configs:
-      - targets: ['__EDGE_HOST__:9180']
-        labels: { node: edge }
-      - targets: ['__REALTIME_HOST__:9180']
-        labels: { node: realtime }
-      - targets: ['__INFRA_HOST__:9180']
-        labels: { node: infra }
+      - { targets: ['__EDGE_HOST__:9180'], labels: { node: edge } }
+      - { targets: ['__REALTIME_HOST__:9180'], labels: { node: realtime } } # multinodo
+      - { targets: ['__INFRA_HOST__:9180'], labels: { node: infra } } # multinodo
     metric_relabel_configs:
       # Nombre del servicio de Compose → label service (igual que en observability/)
       - source_labels: [container_label_com_docker_compose_service]
         target_label: service
         action: replace
-      - regex: 'container_label_.*|id'
+      # name e image cambian en cada deploy (image lleva el SHA): cada deploy crearía series nuevas
+      - regex: 'container_label_.*|id|name|image'
         action: labeldrop
 
   # node_exporter: CPU, memoria y disco de cada máquina
   - job_name: node-exporter
     static_configs:
-      - targets: ['__EDGE_HOST__:9100']
-        labels: { node: edge }
-      - targets: ['__REALTIME_HOST__:9100']
-        labels: { node: realtime }
-      - targets: ['__INFRA_HOST__:9100']
-        labels: { node: infra }
+      - { targets: ['__EDGE_HOST__:9100'], labels: { node: edge } }
+      - { targets: ['__REALTIME_HOST__:9100'], labels: { node: realtime } } # multinodo
+      - { targets: ['__INFRA_HOST__:9100'], labels: { node: infra } } # multinodo
 
   # RabbitMQ (plugin rabbitmq_prometheus, habilitado en rabbitmq/enabled_plugins): mismo nodo y red
   - job_name: rabbitmq
     static_configs:
       - targets: ['rabbitmq:15692']
         labels: { node: infra }
+
+  # Kong (plugin prometheus, Status API en 8100 del nodo edge): RED por servicio de Kong y ruta.
+  # Kong pone su propio label service (el servicio de kong.yml): pasa a upstream, y service=gateway
+  # como el resto de las métricas del gateway.
+  - job_name: kong
+    static_configs:
+      - targets: ['__EDGE_HOST__:8100']
+        labels: { node: edge }
+    metric_relabel_configs:
+      - source_labels: [service]
+        target_label: upstream
+      - target_label: service
+        replacement: gateway
+      - regex: 'workspace|consumer'
+        action: labeldrop

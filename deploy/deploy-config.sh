@@ -8,7 +8,9 @@
 # Pasos: lleva /opt/discordia a ese commit (fast-forward), actualiza el submódulo observability, corre
 # "up -d" de todo el nodo (Compose recrea solo los contenedores cuya definición cambió), recrea a mano los que
 # montan un archivo que cambió (Compose no se entera de eso) y espera a que todo el nodo quede sano. Si no queda,
-# vuelve al commit anterior. Comparte lock y log con deploy-service.sh.
+# vuelve al commit anterior. Los servicios con el label discordia.deploy.optional=true (observabilidad) no
+# cuentan: si no quedan sanos se avisa en el log, pero no se revierte el nodo por ellos. Comparte lock y log con
+# deploy-service.sh.
 # Ver docs/ARQUITECTURA.md, sección 11 ("Deploy de la configuración").
 set -euo pipefail
 
@@ -29,7 +31,8 @@ MOUNTS=(
   "livekit/ livekit"
   "rabbitmq/ rabbitmq"
   "deploy/observability/ prometheus"
-  "observability grafana" # el submódulo: dashboards y provisioning
+  "observability grafana"    # el submódulo: dashboards y provisioning
+  "observability prometheus" # el submódulo: reglas de alerta
 )
 
 # Por SSM puede no estar HOME, y docker y git lo necesitan (login de ghcr.io, credenciales de github.com)
@@ -69,21 +72,34 @@ apply() { # servicios a recrear
   fi
 }
 
-# 0 si todos los servicios del nodo quedan healthy (o running, los que no tienen healthcheck)
+# 0 si todos los servicios obligatorios del nodo quedan healthy (o running, los que no tienen healthcheck).
+# Los opcionales (label discordia.deploy.optional=true en el contenedor) se esperan igual, pero si no quedan
+# sanos solo se avisa. Un contenedor que no existe no tiene label: cuenta como obligatorio.
 wait_healthy() {
-  local deadline=$((SECONDS + HEALTH_TIMEOUT)) svc id status pending
+  local deadline=$((SECONDS + HEALTH_TIMEOUT)) svc id status optional pending optional_pending
   while ((SECONDS < deadline)); do
     pending=""
+    optional_pending=""
     for svc in "${NODE_SERVICES[@]}"; do
       id="$(dc ps -a -q "$svc")"
       status="$( [ -n "$id" ] && docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id" || echo missing)"
-      [[ "$status" =~ ^(healthy|running)$ ]] || pending+=" $svc=$status"
+      [[ "$status" =~ ^(healthy|running)$ ]] && continue
+      optional="$( [ -n "$id" ] && docker inspect -f '{{index .Config.Labels "discordia.deploy.optional"}}' "$id" || true)"
+      if [ "$optional" = "true" ]; then
+        optional_pending+=" $svc=$status"
+      else
+        pending+=" $svc=$status"
+      fi
     done
-    [ -z "$pending" ] && return 0
+    [ -z "$pending" ] && [ -z "$optional_pending" ] && return 0
     sleep 5
   done
-  log "no quedaron sanos en ${HEALTH_TIMEOUT}s:$pending"
-  return 1
+  if [ -n "$pending" ]; then
+    log "no quedaron sanos en ${HEALTH_TIMEOUT}s:$pending${optional_pending:+ (opcionales:$optional_pending)}"
+    return 1
+  fi
+  log "AVISO: opcionales sin quedar sanos en ${HEALTH_TIMEOUT}s:$optional_pending (no se revierte el nodo)"
+  return 0
 }
 
 main() {

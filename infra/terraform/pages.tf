@@ -48,7 +48,7 @@ resource "cloudflare_pages_project" "webapp" {
   }
 }
 
-# Dominio propio: se asocia recién en el corte, junto con el registro DNS (hoy app apunta al monolito)
+# Dominio propio app.discordia.lol, junto con su registro DNS (ver var.manage_dns)
 resource "cloudflare_pages_domain" "app" {
   count = var.manage_dns ? 1 : 0
 

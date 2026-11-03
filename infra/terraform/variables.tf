@@ -59,12 +59,9 @@ variable "cloudflare_zone_id" {
 }
 
 variable "manage_dns" {
-  description = <<-EOT
-    Si Terraform administra api.discordia.lol (Kong) y app.discordia.lol (Pages). Dejar en false hasta
-    el corte (fase 5): hoy los dos apuntan al monolito y crearlos antes desviaría el tráfico real.
-  EOT
+  description = "Si Terraform administra api.discordia.lol (Kong) y app.discordia.lol (Pages)"
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "cloudflare_account_id" {
