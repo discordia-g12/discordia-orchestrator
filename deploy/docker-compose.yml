@@ -152,7 +152,6 @@ services:
     profiles: ["edge"]
     <<: *cross-node
     image: ${REGISTRY:-discordia}/auth-service:${AUTH_SERVICE_TAG:-local}
-    build: ../Auth-User-Service
     restart: unless-stopped
     command: ["python", "-m", "app.workers.outbox_publisher"]
     environment: *auth-env
@@ -224,7 +223,6 @@ services:
     profiles: ["edge"]
     <<: *cross-node
     image: ${REGISTRY:-discordia}/server-roles-service:${SERVER_ROLES_TAG:-local}
-    build: ../Server-Roles-Core-Service
     restart: unless-stopped
     command: ["python", "-m", "app.workers.outbox_publisher"]
     environment: *server-roles-env
@@ -315,15 +313,15 @@ services:
       - chat-mongo-data:/data/db
     healthcheck:
       test: ["CMD-SHELL", "mongosh --eval 'db.adminCommand(\"ping\")' --quiet"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     deploy:
       resources:
         limits:
-          cpus: "0.50"
-          memory: 512M
+          cpus: "1.0"
+          memory: 1024M
     networks: [realtime]
 
   voice-signaling-service:
