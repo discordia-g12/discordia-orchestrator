@@ -76,7 +76,7 @@ resource "aws_budgets_budget" "net_spend" {
   }
 }
 
-# ---------- DNS (solo en el corte: ver var.manage_dns) ----------
+# ---------- DNS de la API (ver var.manage_dns) ----------
 resource "cloudflare_record" "api" {
   count = var.manage_dns ? 1 : 0
 

@@ -39,9 +39,17 @@ services:
     ports:
       - "${GATEWAY_HTTPS_PORT:-8443}:8443"           # Producción: 443, solo desde Cloudflare (Security Group)
       - "127.0.0.1:${GATEWAY_HTTP_PORT:-8000}:8000"  # HTTP sin TLS: local / depuración en el host
+      # Métricas (Status API) para Prometheus. En local, solo el host; en edge KONG_STATUS_BIND=0.0.0.0 y el SG
+      # solo lo abre a infra
+      - "${KONG_STATUS_BIND:-127.0.0.1}:8100:8100"
     environment:
       - KONG_PROXY_LISTEN=0.0.0.0:8000, 0.0.0.0:8443 ssl http2
       - KONG_ADMIN_LISTEN=127.0.0.1:8001             # El Admin API no sale del contenedor
+      - KONG_STATUS_LISTEN=0.0.0.0:8100              # /metrics del plugin prometheus, fuera del proxy
+      # Docker responde los nombres de contenedor con TTL de 600 s: sin esto, después de recrear auth-service o
+      # server-roles-service (deploy) Kong sigue usando la IP vieja hasta 10 min (502, o el servicio equivocado si
+      # las IPs se intercambian). Con 10 s se recupera solo.
+      - KONG_DNS_VALID_TTL=10
       - KONG_NGINX_WORKER_PROCESSES=1
       - AUTH0_DOMAIN=${AUTH0_DOMAIN:-dev-dppme5iaqg60gkmo.us.auth0.com}
       - AUTH0_AUDIENCE=${AUTH0_AUDIENCE:-https://api.discordia.com}
@@ -416,6 +424,13 @@ services:
       # (cifra sin validar el certificado de Amazon, que Node no trae); en local, disable.
       - DATABASE_URL=postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-dev-postgres}@${DB_HOST:-host.docker.internal}:5432/notification_db?sslmode=${NOTIFICATION_DB_SSLMODE:-disable}
       - NODE_OPTIONS=--max-old-space-size=96
+      # Estado de la plataforma: sondea los /readyz por las rutas /internal/readyz/* de Kong (nodo edge), que
+      # solo aceptan IPs privadas. Kong presenta el Origin Certificate de Cloudflare (o uno autofirmado en
+      # local), que Node no valida: se acepta solo para estas sondas, que no llevan credenciales.
+      # Sin default a propósito: si falta, los servicios quedan "unknown" en vez de "degraded" (no se publica
+      # una caída falsa mientras falten la regla de SG o el Gateway con /internal/readyz). Ver .env.example.
+      - STATUS_GATEWAY_URL=${STATUS_GATEWAY_URL:-}
+      - STATUS_TLS_INSECURE=true
     depends_on:
       local-postgres:
         condition: service_healthy
@@ -437,21 +452,30 @@ services:
   # NODO 3 — INFRA: RabbitMQ, Payments, Prometheus y Grafana
   # ======================================================================
   # Prometheus lee los exportadores de los tres nodos por IP:puerto (deploy/observability/).
-  # Dashboards, datasource y reglas: submódulo observability (Pilar).
+  # Dashboards, datasource y reglas de alerta: submódulo observability (Pilar).
+  # Observabilidad = opcional en el deploy (label discordia.deploy.optional): si no queda sana,
+  # deploy-config.sh lo avisa pero no revierte el nodo. La config la valida el CI con promtool.
   prometheus:
     profiles: ["infra"]
     <<: *cross-node
     image: prom/prometheus:v2.53.0
     restart: unless-stopped
-    # Completa la plantilla con las IPs de los nodos y arranca (mismo patrón que Kong)
+    labels:
+      discordia.deploy.optional: "true"
+    # Completa la plantilla con las IPs de los nodos y arranca (mismo patrón que Kong). Si los tres hosts son
+    # el mismo (local), deja un solo target por exportador con node=local (ver la plantilla).
     entrypoint: ["/bin/sh", "-c"]
     command:
-      - >
-        sed -e "s|__EDGE_HOST__|$${EDGE_HOST}|g" -e "s|__REALTIME_HOST__|$${REALTIME_HOST}|g"
-        -e "s|__INFRA_HOST__|$${INFRA_HOST}|g" -e "s|__ENVIRONMENT__|$${ENVIRONMENT}|g"
-        /etc/prometheus/prometheus.yml.tmpl > /prometheus/prometheus.yml &&
-        exec /bin/prometheus --config.file=/prometheus/prometheus.yml --storage.tsdb.path=/prometheus
-        --storage.tsdb.retention.time=7d --web.enable-lifecycle
+      - |
+        set -e
+        sed -e "s|__EDGE_HOST__|$${EDGE_HOST}|g" -e "s|__REALTIME_HOST__|$${REALTIME_HOST}|g" \
+          -e "s|__INFRA_HOST__|$${INFRA_HOST}|g" -e "s|__ENVIRONMENT__|$${ENVIRONMENT}|g" \
+          /etc/prometheus/prometheus.yml.tmpl > /prometheus/prometheus.yml
+        if [ "$${EDGE_HOST}" = "$${REALTIME_HOST}" ] && [ "$${EDGE_HOST}" = "$${INFRA_HOST}" ]; then
+          sed -i -e '/# multinodo$$/d' -e 's/node: [a-z]*/node: local/' /prometheus/prometheus.yml
+        fi
+        exec /bin/prometheus --config.file=/prometheus/prometheus.yml --storage.tsdb.path=/prometheus \
+          --storage.tsdb.retention.time=7d --storage.tsdb.retention.size=2GB --web.enable-lifecycle
     environment:
       - EDGE_HOST=${EDGE_HOST:-host.docker.internal}
       - REALTIME_HOST=${REALTIME_HOST:-host.docker.internal}
@@ -461,7 +485,14 @@ services:
       - "127.0.0.1:9090:9090" # Solo desde el host (en producción, port forwarding por SSM)
     volumes:
       - ./observability/prometheus.yml.tmpl:/etc/prometheus/prometheus.yml.tmpl:ro
+      - ../observability/prometheus/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/-/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -473,16 +504,30 @@ services:
     profiles: ["infra"]
     image: grafana/grafana-oss:11.6.0
     restart: unless-stopped
+    labels:
+      discordia.deploy.optional: "true"
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-dev-grafana}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
     ports:
       - "127.0.0.1:3030:3000" # Solo desde el host (en producción, port forwarding por SSM)
     volumes:
       - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
+    # service_started y no healthy: Grafana arranca aunque Prometheus no esté listo (los paneles esperan)
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -580,11 +625,20 @@ services:
   # EN LOS TRES NODOS: exportadores de métricas (cada máquina reporta lo suyo)
   # Prometheus (nodo infra) los lee por IP:puerto; el Security Group solo abre 9100 y 9180 a infra.
   # En local, con los tres profiles activos, hay uno solo (es una sola máquina).
+  # Opcionales en el deploy (ver prometheus): si uno no queda sano, no revierte el nodo.
   # ======================================================================
   node-exporter:
     profiles: ["edge", "realtime", "infra"]
     image: prom/node-exporter:v1.8.2
     restart: unless-stopped
+    labels:
+      discordia.deploy.optional: "true"
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:9100/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     pid: host
     ports:
       - "9100:9100"
@@ -604,6 +658,14 @@ services:
     profiles: ["edge", "realtime", "infra"]
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     restart: unless-stopped
+    labels:
+      discordia.deploy.optional: "true"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     privileged: true
     cgroup: host            # ve los cgroups de todos los contenedores
     devices:

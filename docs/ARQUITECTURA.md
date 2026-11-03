@@ -116,7 +116,7 @@ Cada nodo es una EC2 en la subnet pública de la VPC, con IP privada fija y su p
 
 | Servicio | Imagen | Puerto publicado | Memoria |
 |---|---|---|---|
-| `gateway` (Kong 3.4) | `ghcr.io/discordia-g12/gateway` | 443 → 8443 (TLS), 127.0.0.1:8000 | 256 MB |
+| `gateway` (Kong 3.4) | `ghcr.io/discordia-g12/gateway` | 443 → 8443 (TLS), 127.0.0.1:8000, 8100 (métricas, solo infra) | 256 MB |
 | `gateway-redis` | `redis:7-alpine` | — | 64 MB |
 | `auth-service` | `ghcr.io/discordia-g12/auth-service` | — | 256 MB |
 | `auth-outbox-worker` | misma imagen que Auth | — | 128 MB |
@@ -246,12 +246,14 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 |---|---|---|---|
 | `discordia-edge` | 443/tcp | Rangos de Cloudflare | Kong (API y WebSockets) |
 | `discordia-edge` | 8002/tcp | grupo realtime | `access` / `can-connect` de Server-Roles (**temporal**) |
+| `discordia-edge` | 443/tcp | grupo realtime | Notification → `/internal/readyz/*` de Kong (estado de la plataforma; Kong solo acepta IPs privadas en esas rutas) |
 | `discordia-realtime` | 3000, 8082, 3001/tcp | grupo edge | Kong → Chat, Voice, Notification |
 | `discordia-realtime` | 7880/tcp | grupo edge | Kong → señalización de LiveKit (`/livekit`) |
 | `discordia-realtime` | 7881/tcp, 7882/udp | 0.0.0.0/0 | Audio WebRTC (LiveKit valida su propio token) |
 | `discordia-infra` | 5672/tcp | grupos edge y realtime | RabbitMQ (workers de outbox y consumidores) |
 | `discordia-infra` | 8003/tcp | grupo edge | Kong → Payments |
 | `discordia-edge`, `discordia-realtime` | 9100, 9180/tcp | grupo infra | Prometheus → Node Exporter y cAdvisor |
+| `discordia-edge` | 8100/tcp | grupo infra | Prometheus → métricas de Kong (Status API) |
 | `discordia-rds` | 5432/tcp | grupos edge, realtime e infra | Auth, Server-Roles, Notification, Payments → RDS |
 
 ### Cloudflare
@@ -512,16 +514,38 @@ eventos" (pendiente, P1 en `DEUDA-TECNICA.md`).
 
 ## 10. Observabilidad
 
-- **Prometheus** (infra) lee por IP:puerto los **Node Exporter** (9100) y **cAdvisor** (9180) de los tres
-  nodos, más el plugin de Prometheus de RabbitMQ. Configuración: `deploy/observability/prometheus.yml.tmpl`
-  (las IPs se completan al arrancar). Retención: 7 días.
-- **Grafana** (infra) usa el datasource y los dashboards del submódulo `observability` (Pilar), incluido
-  *recursos por servicio*.
-- Acceso (no están publicados):
+Tres niveles, en el orden de ADR-O2 (`observability/docs/`): recursos → comportamiento → negocio. Los dos
+primeros van a Prometheus; el de negocio no (sale de eventos que consume Notification).
+
+- **Prometheus** (infra) lee por IP:puerto:
+  - los **Node Exporter** (9100) y **cAdvisor** (9180) de los tres nodos;
+  - las métricas de **Kong** (plugin `prometheus` en la Status API, 8100 de edge), que dan el RED del
+    gateway por servicio de Kong (`upstream`) y ruta;
+  - el plugin de Prometheus de **RabbitMQ**.
+
+  La configuración está en `deploy/observability/prometheus.yml.tmpl` (las IPs se completan al arrancar).
+  Retención: 7 días o 2 GB. Los servicios todavía no exponen `/metrics` propio (deuda O1).
+- **Alertas**: reglas de Prometheus del submódulo (`observability/prometheus/rules/`): target caído, OOM,
+  reinicios, memoria cerca del límite, memoria y disco del host, 5xx del gateway. **No hay Alertmanager**
+  (ADR-O4): se ven en *Alerts* de Prometheus y en el Overview de Grafana, nadie recibe un aviso (deuda O2).
+- **Grafana** (infra) usa el datasource y los dashboards del submódulo `observability`, provisionados por
+  archivo (no se editan desde la UI) y ordenados en carpetas por nivel: *Overview*, *Recursos* (variables
+  `node` y `service`) y *Comportamiento*.
+- **Estado de la plataforma** (historia 74): Notification sondea cada 15 s los `/readyz` de todos los
+  servicios a través de Kong (`/internal/readyz/*`, solo IPs privadas) y los sirve desde memoria:
+  - `GET /api/v1/status` es público y solo da el estado;
+  - `GET /api/v1/admin/status` es staff (Kong y el servicio) y suma la latencia y el motivo.
+
+  El backoffice muestra la versión staff y un link a Grafana. Grafana **no se embebe ni se publica**: la
+  autorización del backoffice la hace el backend (ADR-002 del Gateway) y Grafana tiene su propio login.
+- **Fallas de observabilidad**: Prometheus, Grafana y los exportadores son opcionales en el deploy (§11).
+- Acceso a Grafana y Prometheus (no están publicados):
 
 ```bash
 aws ssm start-session --target <id de infra> --document-name AWS-StartPortForwardingSession \
   --parameters portNumber=3030,localPortNumber=3030      # Grafana → http://localhost:3030
+aws ssm start-session --target <id de infra> --document-name AWS-StartPortForwardingSession \
+  --parameters portNumber=9090,localPortNumber=9090      # Prometheus → http://localhost:9090
 ```
 
 ---
@@ -639,12 +663,19 @@ El script (`deploy/deploy-config.sh`):
 4. Recrea a mano los que montan un archivo que cambió, porque Compose no se entera de eso: `livekit`,
    `rabbitmq`, `prometheus` o `grafana`, y solo si son de ese nodo.
 5. Espera hasta 180 s a que todo el nodo quede `healthy` (o `running`, si no tiene healthcheck). Si no,
-   vuelve al commit anterior.
+   vuelve al commit anterior. Los servicios con el label `discordia.deploy.optional=true` (Prometheus,
+   Grafana, Node Exporter, cAdvisor) se esperan igual, pero si no quedan sanos solo se avisa en el log: una
+   falla de observabilidad no revierte el nodo (ni los cambios de RabbitMQ que vinieran en el mismo commit).
 6. Guarda el último commit aplicado en `/etc/discordia/config-sha`. No alcanza con el `HEAD` del repo: el
    deploy de un servicio también hace `git pull`, y puede traer un `livekit.yaml` nuevo sin recrear
    `livekit`.
 
 Comparte el lock y el log con `deploy-service.sh` (en el log aparece como `image=config`).
+
+Como el deploy ya no frena un Prometheus roto, la configuración se valida antes:
+`.github/workflows/validate-config.yml` (PR y push a `develop`) corre `docker compose config` y
+`promtool check config` sobre la plantilla. Las reglas de alerta las valida el CI de `observability`
+(`promtool check rules` y `test rules`).
 
 ### Seguridad del deploy
 
@@ -680,9 +711,10 @@ Archivos:
 | `deploy/deploy-config.sh` | Deploy de la configuración en un nodo (lo llama el CD) |
 | `deploy/.env.example` | Variables: local y la lista completa de producción por nodo |
 | `deploy/gateway.env.example` | Solo edge: TLS e IPs de confianza de Cloudflare |
-| `deploy/observability/prometheus.yml.tmpl` | Destinos de Prometheus |
+| `deploy/observability/prometheus.yml.tmpl` | Destinos de Prometheus y carga de las reglas de alerta |
 | `.github/workflows/deploy.yml` | Workflow reutilizable del deploy de servicios |
 | `.github/workflows/deploy-config.yml` | Deploy de la configuración |
+| `.github/workflows/validate-config.yml` | Valida el compose y la plantilla de Prometheus antes de `main` |
 | `init-dbs.sql` (raíz) | Solo local: crea las cuatro bases en `local-postgres` |
 | `infra/terraform/` | Infraestructura (ver abajo) |
 
@@ -759,7 +791,10 @@ infra/terraform/
   (`terraform output -raw rds_move_command`), así ningún `terraform destroy` puede borrar la base.
 - **Estado local** (`terraform.tfstate`, no se commitea): tiene que aplicarlo una sola persona y guardar
   una copia. Alternativa: HCP Terraform (bloque `cloud` comentado en `versions.tf`).
-- `manage_dns = false` hasta el corte: recién ahí Terraform administra `api` y `app`.
+- **DNS**: Terraform administra `api`, `app` y `backoffice` de `discordia.lol` (`manage_dns = true`, el
+  default). Los registros de `api` y `app` y el dominio de Pages de la app se crearon antes de que estuvieran
+  en este state y se importaron (`terraform import`). **No poner `manage_dns = false`**: el próximo `apply`
+  los borraría de Cloudflare.
 - Un **budget de $1 sobre el gasto neto** (avisa si algo se cobra fuera de los créditos).
 - `terraform output`: IPs de cada nodo, comandos de SSM, `rds_endpoint`, `rds_move_command`,
   `cloudflare_trusted_ips`, `media_bucket` (`S3_BUCKET` y `S3_PUBLIC_BASE_URL`),
