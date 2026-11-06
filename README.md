@@ -45,7 +45,7 @@ lugar del RDS y de Atlas.
 
 **Requisitos:** Docker con memoria de sobra: los límites de los contenedores suman unos 4 GB, así que conviene
 darle 6 GB a Docker Desktop. También estos puertos libres en el host: 3000, 3001, 5432, 5672,
-7880 a 7882, 8000, 8002, 8003, 8082, 8443, 9090, 9100, 9180 y 3030. Si algún servicio está corriendo con el
+7880 a 7882, 8000, 8001, 8002, 8003, 8082, 8443, 9090, 9100, 9180 y 3030. Si algún servicio está corriendo con el
 compose de su propio repo, bajarlo antes.
 
 ```bash

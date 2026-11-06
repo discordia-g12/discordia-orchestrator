@@ -118,7 +118,7 @@ Cada nodo es una EC2 en la subnet pública de la VPC, con IP privada fija y su p
 |---|---|---|---|
 | `gateway` (Kong 3.4) | `ghcr.io/discordia-g12/gateway` | 443 → 8443 (TLS), 127.0.0.1:8000, 8100 (métricas, solo infra) | 256 MB |
 | `gateway-redis` | `redis:7-alpine` | — | 64 MB |
-| `auth-service` | `ghcr.io/discordia-g12/auth-service` | — | 256 MB |
+| `auth-service` | `ghcr.io/discordia-g12/auth-service` | 8001 → 8000 (solo realtime) | 256 MB |
 | `auth-outbox-worker` | misma imagen que Auth | — | 128 MB |
 | `server-roles-service` | `ghcr.io/discordia-g12/server-roles-service` | 8002 → 8080 (temporal, solo realtime) | 256 MB |
 | `server-roles-outbox-worker` | misma imagen que Server-Roles | — | 128 MB |
@@ -218,7 +218,7 @@ flowchart TB
     E -->|3000 · 8082 · 3001 · 7880| R
     E -->|8003| I
     E & R -->|5672| I
-    R -->|8002| E
+    R -->|8001 · 8002| E
     I -->|9100 · 9180| E & R
     E & R & I -->|5432| DB
 ```
@@ -239,13 +239,15 @@ flowchart TB
 
 ### Puertos abiertos (Security Groups)
 
-Todo lo que no está en esta tabla está cerrado. El Admin API de Kong (8001), el panel de RabbitMQ,
-Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se accede con port forwarding de SSM).
+Todo lo que no está en esta tabla está cerrado. El Admin API de Kong, el panel de RabbitMQ, Prometheus y
+Grafana **no se publican** (quedan en `127.0.0.1` del host; se accede con port forwarding de SSM). El 8001 del
+host es Auth; el Admin API de Kong usa el 8001 dentro de su contenedor y no sale de ahí.
 
 | Security Group | Puerto | Desde | Para qué |
 |---|---|---|---|
 | `discordia-edge` | 443/tcp | Rangos de Cloudflare | Kong (API y WebSockets) |
 | `discordia-edge` | 8002/tcp | grupo realtime | `access` / `can-connect` de Server-Roles (**temporal**) |
+| `discordia-edge` | 8001/tcp | grupo realtime | Chat → `/internal/*` de Auth (id canónico y relación entre usuarios, para los DMs) |
 | `discordia-edge` | 443/tcp | grupo realtime | Notification → `/internal/readyz/*` de Kong (estado de la plataforma; Kong solo acepta IPs privadas en esas rutas) |
 | `discordia-realtime` | 3000, 8082, 3001/tcp | grupo edge | Kong → Chat, Voice, Notification |
 | `discordia-realtime` | 7880/tcp | grupo edge | Kong → señalización de LiveKit (`/livekit`) |
@@ -291,6 +293,7 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 | Kong | Payments | HTTP | `INFRA_HOST:8003` |
 | Chat | Server-Roles `/internal/channels/{id}/access` | HTTP síncrono | `EDGE_HOST:8002` — al abrir cada WebSocket y al pedir el historial |
 | Voice | Server-Roles `/internal/channels/{id}/can-connect` | HTTP síncrono (timeout + 3 reintentos) | `EDGE_HOST:8002` — al unirse a voz |
+| Chat | Auth `/internal/users/{id}/canonical` y `/internal/relations` | HTTP síncrono (timeout; si falla, 503 sin entregar) | `EDGE_HOST:8001` — en cada mensaje directo y al abrir uno. Los canales no lo usan |
 | Auth / Server-Roles (workers) | RabbitMQ | AMQP (publica) | `INFRA_HOST:5672` |
 | Chat | RabbitMQ | AMQP (consume `member.*`) | `INFRA_HOST:5672` |
 | Voice | RabbitMQ | AMQP (consume `member.banned`, `member.kicked`, `member.left`) | `INFRA_HOST:5672` |
@@ -374,6 +377,44 @@ sequenceDiagram
     CH-->>U: cierra el WebSocket (4003)
 ```
 
+### Mensaje directo
+
+Decisión completa en
+[ADR 0011](../org-docs/docs/architecture/decisions/0011-mensajes-directos.md). Un DM usa las rutas de canal
+con un id `dm-<ObjectId>`: `channelAccessGuard` valida que sea participante y no consulta a Server-Roles. La
+relación se revisa en cada envío, nunca se cachea en el socket.
+
+```mermaid
+sequenceDiagram
+    participant A as Emisor
+    participant K as Kong
+    participant CH as Chat (realtime)
+    participant AU as Auth (edge)
+    participant M as Atlas
+    participant R as chat-redis
+    participant B as Destinatario
+
+    A->>K: POST /api/v1/chat/channels/dm-…/messages
+    K->>CH: X-User-Id
+    CH->>AU: GET /internal/users/{id}/canonical
+    CH->>AU: GET /internal/relations?actor=…&other=…
+    AU-->>CH: friends, blocked_by_actor, blocked_by_other, suspended
+    alt bloqueo o cuenta suspendida
+        CH-->>A: 403 DM_NOT_DELIVERABLE (genérico)
+    else conversación sin aceptar
+        CH-->>A: 403 DM_PENDING
+    else entregable
+        CH->>M: guarda el mensaje y actualiza la conversación
+        CH->>R: publica en inbox:<usuario> y en el canal dm-…
+        R-->>B: DM_MESSAGE por /inbox/ws (si está conectado)
+        CH-->>A: 201
+    end
+```
+
+Si el destinatario no está conectado, el mensaje queda en Atlas y aparece en `unreadCount` de
+`GET /conversations`, que el cliente vuelve a pedir al reconectar. La presencia es una clave en `chat-redis`
+con TTL de 60 s que renueva el heartbeat del inbox.
+
 ### Voz
 
 ```mermaid
@@ -416,11 +457,12 @@ cuando vuelve a pasar por `/join` (que chequea `can-connect`).
 | `server_roles_db` | RDS | La usa Server-Roles (edge) |
 | `notification_db` | RDS | La usa Notification (realtime) |
 | `payments_db` | RDS | La usa Payments (infra) |
-| Historial del chat | MongoDB Atlas M0 | En local, `chat-mongo` (profile `local`) |
+| Historial del chat y conversaciones directas | MongoDB Atlas M0 | En local, `chat-mongo` (profile `local`) |
+| Amistades, solicitudes de amistad y bloqueos | `auth_db` (RDS) | `friendships`, `friend_requests`, `user_blocks`, siempre con el id canónico |
 | Avatares | S3 `discordia-g12-media/avatars/` | Los sube Auth; la URL queda en `auth_db` (`user_profiles.avatar_url`) |
 | Íconos de servidor | S3 `discordia-g12-media/server-icons/` | Los sube Server-Roles; la URL queda en `server_roles_db` (`servers.icon_url`) |
 | Sesiones de voz, presencia | `voice-redis` (realtime) | Local al nodo |
-| Pub/sub del chat | `chat-redis` (realtime) | `noeviction` |
+| Pub/sub del chat, inbox de DMs y presencia | `chat-redis` (realtime) | `noeviction` |
 | Rate limiting | `gateway-redis` (edge) | `allkeys-lru` |
 | Eventos | RabbitMQ (infra) | Volumen persistente `rabbitmq-data` |
 
@@ -504,11 +546,13 @@ Mecanismos:
   no-ready (para no propagar una caída de infra).
 - **Outbox**: si RabbitMQ no está, los eventos esperan en la base del productor (en el RDS).
 - **Voice → Server-Roles**: timeout de 2 s y 3 intentos; si no responde, el join da 503 (ADR-03 de Voice).
+- **Chat → Auth**: los DMs **fallan cerrados**: si Auth no responde, 503 y no se entrega nada. Los canales no
+  dependen de Auth y siguen funcionando.
 - **`restart: unless-stopped`** y healthchecks en todos los contenedores.
 
-**Dependencia síncrona que queda**: Chat y Voice consultan a Server-Roles (edge) al abrir un WebSocket o
-unirse a voz. Si edge cae, ya no importa (tampoco hay API). Se puede eliminar con la "foto de permisos por
-eventos" (pendiente, P1 en `DEUDA-TECNICA.md`).
+**Dependencias síncronas que quedan**: Chat y Voice consultan a Server-Roles (edge) al abrir un WebSocket o
+unirse a voz, y Chat consulta a Auth (edge) en cada DM. Si edge cae, ya no importa (tampoco hay API). La de
+Server-Roles se puede eliminar con la "foto de permisos por eventos" (pendiente, P1 en `DEUDA-TECNICA.md`).
 
 ---
 
@@ -769,6 +813,9 @@ Entrar a un nodo: `aws ssm start-session --target <id>` (`terraform output ssm_c
   segundos), ese servicio no responde. Los clientes reconectan el WebSocket solos.
 - **El estado de Terraform es local** (deuda I1 en `DEUDA-TECNICA.md`): el rol `discordia-cd` lo aplica
   quien tiene el `terraform.tfstate`.
+- **El puerto 8001 necesita `terraform apply` antes del deploy.** El CD no aplica Terraform: si el compose con
+  `AUTH_SERVICE_URL` llega a realtime sin la regla en el Security Group, los DMs fallan cerrados (503). Los
+  canales no se enteran.
 
 ### Terraform
 
