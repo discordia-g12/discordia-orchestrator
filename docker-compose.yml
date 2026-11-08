@@ -45,8 +45,10 @@ services:
     image: redis:7-alpine
     container_name: discordia-gateway-redis
     restart: unless-stopped
-    # Contadores de rate limit: si se llena, perder los más viejos es aceptable.
-    command: ["redis-server", "--maxmemory", "40mb", "--maxmemory-policy", "allkeys-lru"]
+    # Contadores de rate limit y cuentas suspendidas (las escribe auth-service, las lee Kong). volatile-lru: si
+    # se llena descarta solo claves con TTL (contadores); la de cada email suspendido no tiene TTL y nunca se
+    # pierde (ADR-002 de Auth-User-Service).
+    command: ["redis-server", "--maxmemory", "40mb", "--maxmemory-policy", "volatile-lru"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -111,6 +113,15 @@ services:
       - AUTH0_DOMAIN=${AUTH0_DOMAIN:-dev-dppme5iaqg60gkmo.us.auth0.com}
       - AUTH0_CLIENT_ID=${AUTH0_CLIENT_ID:-f2H8PhlKDl3KSIm64G5mHAeQih7iFyIP}
       - AUTH0_DB_CONNECTION=Username-Password-Authentication
+
+      # Suspensión de usuarios (backoffice). Aplicación Machine to Machine de Auth0 (read:users, update:users):
+      # sin ella, suspender responde 503. La lista de suspendidos va al Redis del Gateway
+      - AUTH0_MGMT_CLIENT_ID=${AUTH0_MGMT_CLIENT_ID:-}
+      - AUTH0_MGMT_CLIENT_SECRET=${AUTH0_MGMT_CLIENT_SECRET:-}
+      - GATEWAY_REDIS_HOST=gateway-redis
+      - GATEWAY_REDIS_PORT=6379
+      # Vida del access token en la API de Auth0 (86400 s por defecto)
+      - SUSPENSION_DENYLIST_TTL_SECONDS=${SUSPENSION_DENYLIST_TTL_SECONDS:-86400}
 
       # Imágenes en S3. Sin S3_BUCKET la subida responde 503 (el resto anda igual).
       - AWS_REGION=${AWS_REGION:-us-east-1}
