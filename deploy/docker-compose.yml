@@ -87,8 +87,10 @@ services:
     profiles: ["edge"]
     image: redis:7-alpine
     restart: unless-stopped
-    # Contadores de rate limit: si se llena, perder los más viejos es aceptable.
-    command: ["redis-server", "--maxmemory", "40mb", "--maxmemory-policy", "allkeys-lru"]
+    # Contadores de rate limit y cuentas suspendidas (las escribe auth-service, las lee Kong). volatile-lru: si
+    # se llena descarta solo claves con TTL (contadores); la de cada email suspendido no tiene TTL y nunca se
+    # pierde (ADR-002 de Auth-User-Service).
+    command: ["redis-server", "--maxmemory", "40mb", "--maxmemory-policy", "volatile-lru"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -121,6 +123,13 @@ services:
       AUTH0_DOMAIN: ${AUTH0_DOMAIN:-dev-dppme5iaqg60gkmo.us.auth0.com}
       AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-f2H8PhlKDl3KSIm64G5mHAeQih7iFyIP}
       AUTH0_DB_CONNECTION: Username-Password-Authentication
+      # Suspensión de usuarios (backoffice): aplicación Machine to Machine de Auth0 (read:users, update:users).
+      # Sin ella, suspender responde 503. La lista de suspendidos va al Redis del Gateway, en este mismo nodo
+      AUTH0_MGMT_CLIENT_ID: ${AUTH0_MGMT_CLIENT_ID:-}
+      AUTH0_MGMT_CLIENT_SECRET: ${AUTH0_MGMT_CLIENT_SECRET:-}
+      GATEWAY_REDIS_HOST: gateway-redis
+      GATEWAY_REDIS_PORT: "6379"
+      SUSPENSION_DENYLIST_TTL_SECONDS: ${SUSPENSION_DENYLIST_TTL_SECONDS:-86400}
       # Imágenes en S3 con el usuario IAM propio del servicio (no usa el rol de la EC2: anda en cualquier nodo)
       AWS_REGION: ${AWS_REGION:-us-east-1}
       S3_BUCKET: ${S3_BUCKET:-}

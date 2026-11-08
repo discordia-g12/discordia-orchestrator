@@ -421,7 +421,7 @@ cuando vuelve a pasar por `/join` (que chequea `can-connect`).
 | Íconos de servidor | S3 `discordia-g12-media/server-icons/` | Los sube Server-Roles; la URL queda en `server_roles_db` (`servers.icon_url`) |
 | Sesiones de voz, presencia | `voice-redis` (realtime) | Local al nodo |
 | Pub/sub del chat | `chat-redis` (realtime) | `noeviction` |
-| Rate limiting | `gateway-redis` (edge) | `allkeys-lru` |
+| Rate limiting y cuentas suspendidas | `gateway-redis` (edge) | `volatile-lru`: las suspensiones las escribe Auth y las lee Kong; la clave por email no tiene TTL y nunca se descarta ([ADR-002 de Auth-User](../Auth-User-Service/docs/ADR-002-Suspension-Usuarios.md)) |
 | Eventos | RabbitMQ (infra) | Volumen persistente `rabbitmq-data` |
 
 - **Una base por servicio, en una sola instancia**: ningún servicio lee la base de otro (se hablan por
