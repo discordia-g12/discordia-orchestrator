@@ -16,6 +16,7 @@ services:
       # Los destinos de los servicios usan los defaults de Gateway/render-config.sh (nombres de este compose).
       - KONG_ADMIN_LISTEN=0.0.0.0:8001
       - KONG_NGINX_WORKER_PROCESSES=1
+      - KONG_UNTRUSTED_LUA_SANDBOX_REQUIRES=gateway_health,auth0_validator,resty.openidc,resty.http,cjson.safe
     env_file:
       - ./Gateway/.env
     volumes:
@@ -359,6 +360,8 @@ services:
       - REDIS_URL=redis://chat-redis:6379
       - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@rabbitmq:5672/
       - NODE_OPTIONS=--max-old-space-size=192
+    volumes:
+      - chat-uploads-data:/usr/src/app/uploads
     depends_on:
       chat-mongo:
         condition: service_healthy
@@ -605,3 +608,4 @@ volumes:
   chat-mongo-data: null
   chat-redis-data: null
   rabbitmq-data: null
+  chat-uploads-data: null
