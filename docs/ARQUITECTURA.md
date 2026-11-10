@@ -118,7 +118,7 @@ Cada nodo es una EC2 en la subnet pública de la VPC, con IP privada fija y su p
 |---|---|---|---|
 | `gateway` (Kong 3.4) | `ghcr.io/discordia-g12/gateway` | 443 → 8443 (TLS), 127.0.0.1:8000, 8100 (métricas, solo infra) | 256 MB |
 | `gateway-redis` | `redis:7-alpine` | — | 64 MB |
-| `auth-service` | `ghcr.io/discordia-g12/auth-service` | — | 256 MB |
+| `auth-service` | `ghcr.io/discordia-g12/auth-service` | 8001 → 8000 (solo realtime: Chat, ADR 0011) | 256 MB |
 | `auth-outbox-worker` | misma imagen que Auth | — | 128 MB |
 | `server-roles-service` | `ghcr.io/discordia-g12/server-roles-service` | 8002 → 8080 (temporal, solo realtime) | 256 MB |
 | `server-roles-outbox-worker` | misma imagen que Server-Roles | — | 128 MB |
@@ -218,7 +218,7 @@ flowchart TB
     E -->|3000 · 8082 · 3001 · 7880| R
     E -->|8003| I
     E & R -->|5672| I
-    R -->|8002| E
+    R -->|8001 · 8002| E
     I -->|9100 · 9180| E & R
     E & R & I -->|5432| DB
 ```
@@ -239,13 +239,15 @@ flowchart TB
 
 ### Puertos abiertos (Security Groups)
 
-Todo lo que no está en esta tabla está cerrado. El Admin API de Kong (8001), el panel de RabbitMQ,
+Todo lo que no está en esta tabla está cerrado. El Admin API de Kong (8001 dentro de su contenedor, no es el 8001
+del host, que es Auth), el panel de RabbitMQ,
 Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se accede con port forwarding de SSM).
 
 | Security Group | Puerto | Desde | Para qué |
 |---|---|---|---|
 | `discordia-edge` | 443/tcp | Rangos de Cloudflare | Kong (API y WebSockets) |
 | `discordia-edge` | 8002/tcp | grupo realtime | `access` / `can-connect` de Server-Roles (**temporal**) |
+| `discordia-edge` | 8001/tcp | grupo realtime | Chat → Auth: id canónico y relaciones (inbox y DMs, ADR 0011) |
 | `discordia-edge` | 443/tcp | grupo realtime | Notification → `/internal/readyz/*` de Kong (estado de la plataforma; Kong solo acepta IPs privadas en esas rutas) |
 | `discordia-realtime` | 3000, 8082, 3001/tcp | grupo edge | Kong → Chat, Voice, Notification |
 | `discordia-realtime` | 7880/tcp | grupo edge | Kong → señalización de LiveKit (`/livekit`) |
@@ -289,6 +291,7 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 | Kong | Auth, Server-Roles | HTTP | mismo nodo (`auth-service:8000`, `server-roles-service:8080`) |
 | Kong | Chat (REST y WS), Voice (REST y `/ws/voice`), Notification, LiveKit | HTTP / WebSocket | `REALTIME_HOST:3000/8082/3001/7880` |
 | Kong | Payments | HTTP | `INFRA_HOST:8003` |
+| Chat | Auth `/internal/users/{id}/canonical` y `/internal/relations` | HTTP síncrono (timeout 2 s) | `EDGE_HOST:8001` — al abrir el inbox y en cada DM; si no responde, 503 |
 | Chat | Server-Roles `/internal/channels/{id}/access` | HTTP síncrono | `EDGE_HOST:8002` — al abrir cada WebSocket y al pedir el historial |
 | Chat | Server-Roles `/internal/servers/{id}/member-ids` | HTTP síncrono | `EDGE_HOST:8002` — al recibir `server.updated`, para avisar a los miembros por el inbox |
 | Voice | Server-Roles `/internal/channels/{id}/can-connect` | HTTP síncrono (timeout + 3 reintentos) | `EDGE_HOST:8002` — al unirse a voz |

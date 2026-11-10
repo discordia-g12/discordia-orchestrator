@@ -112,6 +112,10 @@ services:
     image: ${REGISTRY:-discordia}/auth-service:${AUTH_SERVICE_TAG:-local}
     build: ../Auth-User-Service
     restart: unless-stopped
+    ports:
+      # Chat (nodo realtime) consulta /internal/users/{id}/canonical y /internal/relations: inbox y DMs.
+      # En producción el Security Group solo lo abre al grupo realtime (ADR 0011)
+      - "8001:8000"
     environment: &auth-env
       ENVIRONMENT: ${ENVIRONMENT:-production}
       # RDS (local: el Postgres de desarrollo del profile local, por host.docker.internal:5432)
@@ -270,6 +274,8 @@ services:
       # can-send contra Server-Roles (nodo edge) al abrir cada WebSocket; después la sesión se
       # actualiza con los eventos member.* que llegan por RabbitMQ (nodo infra)
       - CORE_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8002
+      # Id canónico y relaciones contra Auth (nodo edge): sin esto el inbox y los DMs responden 503
+      - AUTH_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8001
       - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@${INFRA_HOST:-host.docker.internal}:5672/
       - RABBITMQ_EXCHANGE=server.events
       - NODE_OPTIONS=--max-old-space-size=192

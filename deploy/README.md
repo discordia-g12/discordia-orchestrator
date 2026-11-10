@@ -4,7 +4,7 @@ Un solo compose (`deploy/docker-compose.yml`) para los tres nodos, igual en loca
 
 | Nodo (profile) | Red | Servicios | Puertos publicados (para los otros nodos) |
 |---|---|---|---|
-| `edge` | `edge` | Kong + Redis, Auth (+worker), Server-Roles (+worker) | 443/8443 (Kong), 8002 (Server-Roles internal), 8100 (métricas de Kong, solo para infra) |
+| `edge` | `edge` | Kong + Redis, Auth (+worker), Server-Roles (+worker) | 443/8443 (Kong), 8001 (Auth internal, para Chat), 8002 (Server-Roles internal), 8100 (métricas de Kong, solo para infra) |
 | `realtime` | `realtime` | Chat + Redis, Voice + Redis, LiveKit, Notification | 3000, 8082, 3001, 7880, 7881, 7882/udp |
 | `infra` | `infra` | RabbitMQ, Payments, Prometheus, Grafana | 5672, 8003 |
 | los tres | (default) | Node Exporter, cAdvisor (métricas de la máquina y de sus contenedores) | 9100, 9180 (solo para infra) |
