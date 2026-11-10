@@ -419,7 +419,7 @@ cuando vuelve a pasar por `/join` (que chequea `can-connect`).
 |---|---|---|
 | `auth_db` | RDS | La usa Auth-User (edge) |
 | `server_roles_db` | RDS | La usa Server-Roles (edge) |
-| `notification_db` | RDS | La usa Notification (realtime) |
+| `notification_db` | RDS | La usa Notification (realtime): `incidents` y `audit_logs`, creadas por sus migraciones al arrancar ([ADR-03](../Notification-Audit-Metrics-Service/docs/ADR-03-Incidentes-y-migraciones.md)) |
 | `payments_db` | RDS | La usa Payments (infra) |
 | Historial del chat | MongoDB Atlas M0 | En local, `chat-mongo` (profile `local`) |
 | Avatares | S3 `discordia-g12-media/avatars/` | Los sube Auth; la URL queda en `auth_db` (`user_profiles.avatar_url`) |
@@ -462,7 +462,9 @@ volumen vacío). Si después se cambia el valor en `nodes.env`, hay que cambiarl
 | `/api/v1/voice`, `/ws/voice` | Voice-Signaling | JWT |
 | `/livekit` | LiveKit (señalización, sin el prefijo) | token propio de LiveKit |
 | `/api/v1/payments`, `/points`, `/boosts` | Payments | JWT + rate limit |
-| `/api/v1/notifications`, `/audit`, `/metrics`, `/status` | Notification | JWT (algunas solo staff, [ADR-002](../Gateway/docs/ADR-002-Rol-Staff-Backoffice.md)) |
+| `/api/v1/notifications` | Notification | JWT |
+| `/api/v1/audit`, `/metrics`, `/admin/status`, `/admin/incidents` | Notification | JWT + rol staff ([ADR-002](../Gateway/docs/ADR-002-Rol-Staff-Backoffice.md)) |
+| `/api/v1/status` | Notification | pública (estado e incidentes activos) |
 | `/livez`, `/readyz` | Kong | pública |
 
 - En producción (`deploy/gateway.env`): TLS con el Origin Certificate (`KONG_SSL_CERT`), `KONG_TRUSTED_IPS`
@@ -538,8 +540,14 @@ primeros van a Prometheus; el de negocio no (sale de eventos que consume Notific
   `node` y `service`) y *Comportamiento*.
 - **Estado de la plataforma** (historia 74): Notification sondea cada 15 s los `/readyz` de todos los
   servicios a través de Kong (`/internal/readyz/*`, solo IPs privadas) y los sirve desde memoria:
-  - `GET /api/v1/status` es público y solo da el estado;
-  - `GET /api/v1/admin/status` es staff (Kong y el servicio) y suma la latencia y el motivo.
+  - `GET /api/v1/status` es público: da el estado combinado con los incidentes activos (operativo, degradado o
+    en mantenimiento) y los incidentes;
+  - `GET /api/v1/admin/status` es staff (Kong y el servicio) y suma la latencia y el motivo;
+  - `/api/v1/admin/incidents` (staff) publica, lista y resuelve incidentes, guardados en `notification_db` con
+    su registro en `audit_logs` ([ADR-03](../Notification-Audit-Metrics-Service/docs/ADR-03-Incidentes-y-migraciones.md)).
+
+  La web consulta el estado público cada 60 s y muestra un aviso mientras haya incidentes activos. El
+  backoffice sugiere publicar uno cuando un servicio queda degradado y ningún incidente lo cubre.
 
   El backoffice muestra la versión staff y un link a Grafana. Grafana **no se embebe ni se publica**: la
   autorización del backoffice la hace el backend (ADR-002 del Gateway) y Grafana tiene su propio login.
@@ -647,6 +655,11 @@ script en el nodo.
 
 Los healthchecks de los servicios en el compose usan `/readyz`: un servicio que arranca pero no llega a su base o a RabbitMQ
 no queda `healthy`, y el deploy vuelve atrás.
+
+**Migraciones.** Auth-User corre `alembic upgrade head`; Notification aplica las suyas al arrancar, antes de
+escuchar ([ADR-03](../Notification-Audit-Metrics-Service/docs/ADR-03-Incidentes-y-migraciones.md)). Si una
+falla, el contenedor no queda `healthy` y el deploy vuelve al tag anterior. El rollback no deshace el esquema:
+las migraciones tienen que ser aditivas para que la imagen anterior siga arrancando.
 
 ### Deploy de la configuración
 
