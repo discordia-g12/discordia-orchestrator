@@ -35,7 +35,7 @@
 | Historial del chat | **MongoDB Atlas M0** |
 | Mensajería | **RabbitMQ** en infra; eventos publicados con el patrón **Outbox** |
 | Audio de voz | **LiveKit** en realtime; el audio va directo por UDP 7882 (no pasa por Cloudflare) |
-| Avatares e íconos de servidor | **Bucket S3** `discordia-g12-media`: Auth y Server-Roles suben, los clientes leen directo del bucket ([ADR-003](../Auth-User-Service/docs/ADR-003-Avatares.md)) |
+| Avatares, íconos y banners de servidor | **Bucket S3** `discordia-g12-media`: Auth y Server-Roles suben (los banners van en `server-icons/banners/`), los clientes leen directo del bucket ([ADR-003](../Auth-User-Service/docs/ADR-003-Avatares.md)) |
 | Imágenes de contenedores | Cada repo las publica en **GHCR** desde su CI (tag = SHA del commit) |
 | Despliegue | **Automático desde `main`**: el CI de cada servicio le ordena a su nodo, por **SSM**, que despliegue la imagen nueva, con healthcheck y rollback. GitHub entra a AWS por **OIDC**, sin claves guardadas |
 | Ejecución | **Un solo `deploy/docker-compose.yml`** con un *profile* por nodo; cada EC2 levanta el suyo |
@@ -290,9 +290,10 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 | Kong | Chat (REST y WS), Voice (REST y `/ws/voice`), Notification, LiveKit | HTTP / WebSocket | `REALTIME_HOST:3000/8082/3001/7880` |
 | Kong | Payments | HTTP | `INFRA_HOST:8003` |
 | Chat | Server-Roles `/internal/channels/{id}/access` | HTTP síncrono | `EDGE_HOST:8002` — al abrir cada WebSocket y al pedir el historial |
+| Chat | Server-Roles `/internal/servers/{id}/member-ids` | HTTP síncrono | `EDGE_HOST:8002` — al recibir `server.updated`, para avisar a los miembros por el inbox |
 | Voice | Server-Roles `/internal/channels/{id}/can-connect` | HTTP síncrono (timeout + 3 reintentos) | `EDGE_HOST:8002` — al unirse a voz |
 | Auth / Server-Roles (workers) | RabbitMQ | AMQP (publica) | `INFRA_HOST:5672` |
-| Chat | RabbitMQ | AMQP (consume `member.*`) | `INFRA_HOST:5672` |
+| Chat | RabbitMQ | AMQP (consume `member.*`, `role.*`, `server.deleted`, `server.updated`, `channel.deleted`, `user.suspended`) | `INFRA_HOST:5672` |
 | Voice | RabbitMQ | AMQP (consume `member.banned`, `member.kicked`, `member.left`) | `INFRA_HOST:5672` |
 | Voice | LiveKit | API de servidor | mismo nodo (`livekit:7880`) |
 | LiveKit | Voice `/webhooks/livekit` | Webhook HTTP | mismo nodo |
@@ -333,11 +334,12 @@ que el cambio. Un worker aparte lo publica en RabbitMQ (al menos una vez; los co
 | Productor | Exchange (topic) | Eventos |
 |---|---|---|
 | Auth-User | `user.events` | `user.registered`, `user.profile.updated` |
-| Server-Roles | `server.events` | `channel.created/updated/deleted`, `channels.reordered`, `category.created/updated/deleted`, `categories.reordered`, `role.permissions_updated`, `role.deleted`, `member.role_assigned/removed`, `member.left`, `member.kicked`, `member.banned/unbanned`, `member.muted/unmuted` |
+| Server-Roles | `server.events` | `server.updated` (nombre, descripción, ícono o banner), `server.deleted`, `channel.created/updated/deleted`, `channels.reordered`, `category.created/updated/deleted`, `categories.reordered`, `role.permissions_updated`, `role.deleted`, `member.role_assigned/removed`, `member.left`, `member.kicked`, `member.banned/unbanned`, `member.muted/unmuted` |
 
 | Consumidor | Cola | Binding | Qué hace |
 |---|---|---|---|
 | Chat-Engine | `chat_engine_events` (durable) | `member.*` | ban / kick / salida → cierra el WebSocket; mute / unmute → habilita o bloquea el envío |
+| Chat-Engine | `chat_engine_events` (durable) | `server.updated` | Pide los miembros a Server-Roles y les manda `SERVER_UPDATED` por el inbox; el cliente vuelve a pedir sus servidores ([ADR 0013](../org-docs/docs/architecture/decisions/0013-cambios-de-servidor-en-vivo.md)) |
 | Voice-Signaling | `voice_signaling_events` (durable) | `member.banned`, `member.kicked`, `member.left` | Saca al usuario de la llamada de ese servidor y lo bloquea para que no vuelva a entrar con un token viejo |
 
 **Ver y escribir son permisos distintos** en el chat: `/internal/channels/{id}/access` responde 403 si el
@@ -819,6 +821,7 @@ curl -i localhost:8000/livez
 | Un RDS con una base por servicio | Postgres en contenedor por nodo; un RDS por servicio | Uno por servicio cuadruplicaría el costo. Contra: punto único de falla (sección 9) |
 | Una VPC con un Security Group por nodo | Una VPC por nodo + peering | Los tres nodos están en la misma cuenta, así que las VPCs separadas solo sumaban peerings y rutas. El aislamiento entre nodos lo dan los Security Groups igual |
 | RDS movido a la VPC de los nodos | Dejarlo en su VPC + peering | Sin peering ni rutas; la base queda en subnets sin salida a internet y solo la ven los tres nodos |
+| Cambios de configuración del servidor por el inbox de cada miembro (`server.updated` → Chat → `SERVER_UPDATED`) | Avisar por el WebSocket de canal; polling de la lista de servidores | El socket de canal no le llega a quien está en otro servidor, y la barra muestra todos. El evento lleva solo el id y el cliente vuelve a pedir (ADR 0013) |
 | S3 para avatares e íconos, subida a través del servicio | Cloudinary; presigned POST; rol IAM de la EC2 | Un solo proveedor (AWS, mismos créditos y budget); el servicio valida y normaliza la imagen; un usuario IAM por servicio lo deja desplegable en cualquier nodo (ADR-003) |
 | Cloudflare Pages | Vercel | Vercel desaconseja un proxy adelante; Pages convive con la nube naranja |
 | Cloudflare proxy en `api` | DNS directo / Vercel rewrites | Oculta la IP, TLS gratis, anti-DDoS. Vercel no soporta WebSockets hacia afuera |
