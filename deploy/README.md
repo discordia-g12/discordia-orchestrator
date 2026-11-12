@@ -43,6 +43,11 @@ En producción, orden de puesta en marcha:
 
 Si se agrega antes, el estado público muestra una caída falsa.
 
+**Métricas globales:** Notification arma `/api/v1/admin/metrics` (solo staff) pidiendo los conteos a
+`/internal/metrics/*` de Chat (`CHAT_ENGINE_URL`, mismo nodo) y de Server-Roles (`CORE_SERVICE_URL`, el 8002
+de edge). No hay variable nueva en `nodes.env`: salen de `EDGE_HOST`, y la regla edge 8002 desde realtime ya
+existe. Si uno de los dos no responde, el dato sale vacío y el resto se muestra igual.
+
 **Cada nodo tiene su propia red de Docker.** Los contenedores de un nodo se ven por nombre entre ellos,
 pero no ven los de otro nodo: lo que cruza de un nodo a otro va a la IP del host y al puerto publicado,
 igual que entre máquinas distintas.

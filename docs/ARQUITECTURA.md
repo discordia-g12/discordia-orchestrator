@@ -246,7 +246,7 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 | Security Group | Puerto | Desde | Para qué |
 |---|---|---|---|
 | `discordia-edge` | 443/tcp | Rangos de Cloudflare | Kong (API y WebSockets) |
-| `discordia-edge` | 8002/tcp | grupo realtime | `access` / `can-connect` de Server-Roles (**temporal**) |
+| `discordia-edge` | 8002/tcp | grupo realtime | `access` / `can-connect` de Server-Roles (**temporal**) y conteos de las métricas globales |
 | `discordia-edge` | 8001/tcp | grupo realtime | Chat → Auth: id canónico y relaciones (inbox y DMs, ADR 0011) |
 | `discordia-edge` | 443/tcp | grupo realtime | Notification → `/internal/readyz/*` de Kong (estado de la plataforma; Kong solo acepta IPs privadas en esas rutas) |
 | `discordia-realtime` | 3000, 8082, 3001/tcp | grupo edge | Kong → Chat, Voice, Notification |
@@ -295,6 +295,8 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 | Chat | Server-Roles `/internal/channels/{id}/access` | HTTP síncrono | `EDGE_HOST:8002` — al abrir cada WebSocket y al pedir el historial |
 | Chat | Server-Roles `/internal/servers/{id}/member-ids` | HTTP síncrono | `EDGE_HOST:8002` — al recibir `server.updated`, para avisar a los miembros por el inbox |
 | Voice | Server-Roles `/internal/channels/{id}/can-connect` | HTTP síncrono (timeout + 3 reintentos) | `EDGE_HOST:8002` — al unirse a voz |
+| Notification | Chat `/internal/metrics/messages` | HTTP síncrono (timeout 2 s) | mismo nodo (`chat-engine-service:3000`) — métricas globales del backoffice; si no responde, ese dato sale en `null` |
+| Notification | Server-Roles `/internal/metrics/servers` | HTTP síncrono (timeout 2 s) | `EDGE_HOST:8002` — métricas globales del backoffice; si no responde, ese dato sale en `null` |
 | Auth / Server-Roles (workers) | RabbitMQ | AMQP (publica) | `INFRA_HOST:5672` |
 | Chat | RabbitMQ | AMQP (consume `member.*`, `role.*`, `server.deleted`, `server.updated`, `channel.deleted`, `user.suspended`) | `INFRA_HOST:5672` |
 | Voice | RabbitMQ | AMQP (consume `member.banned`, `member.kicked`, `member.left`) | `INFRA_HOST:5672` |
@@ -463,7 +465,7 @@ volumen vacío). Si después se cambia el valor en `nodes.env`, hay que cambiarl
 | `/livekit` | LiveKit (señalización, sin el prefijo) | token propio de LiveKit |
 | `/api/v1/payments`, `/points`, `/boosts` | Payments | JWT + rate limit |
 | `/api/v1/notifications` | Notification | JWT |
-| `/api/v1/audit`, `/metrics`, `/admin/status`, `/admin/incidents` | Notification | JWT + rol staff ([ADR-002](../Gateway/docs/ADR-002-Rol-Staff-Backoffice.md)) |
+| `/api/v1/audit`, `/metrics`, `/admin/status`, `/admin/incidents`, `/admin/metrics` | Notification | JWT + rol staff ([ADR-002](../Gateway/docs/ADR-002-Rol-Staff-Backoffice.md)) |
 | `/api/v1/status` | Notification | pública (estado e incidentes activos) |
 | `/livez`, `/readyz` | Kong | pública |
 
@@ -494,7 +496,7 @@ volumen vacío). Si después se cambia el valor en `nodes.env`, hay que cambiarl
 | Se cae | Sigue funcionando | Deja de funcionar |
 |---|---|---|
 | **infra** | Login, servidores, canales, chat y voz | Payments; eventos en vivo (bans y mutes se aplican al volver: quedan en la cola o en el outbox); métricas |
-| **realtime** | Login, servidores, canales, roles, Payments | Chat, voz, notificaciones |
+| **realtime** | Login, servidores, canales, roles, Payments | Chat, voz, notificaciones, estado y métricas globales del backoffice |
 | **edge** | Nada desde afuera (es la única entrada) | Toda la API. Los WebSockets abiertos se cortan |
 | **RDS** | Chat ya abierto (mensajes en Atlas) y voz ya conectada | Login, servidores, canales, permisos (nuevos WebSockets y joins de voz fallan en `access` / `can-connect`), notificaciones y Payments |
 | **S3** | Todo lo demás | Subir avatar y crear un servidor con ícono (503, sin dejar nada a medias); las imágenes no se ven |
@@ -548,6 +550,12 @@ primeros van a Prometheus; el de negocio no (sale de eventos que consume Notific
 
   La web consulta el estado público cada 60 s y muestra un aviso mientras haya incidentes activos. El
   backoffice sugiere publicar uno cuando un servicio queda degradado y ningún incidente lo cubre.
+
+- **Métricas globales** (backoffice, [ADR 0014](../org-docs/docs/architecture/decisions/0014-metricas-globales-de-la-plataforma.md)):
+  `GET /api/v1/admin/metrics?from&to` (staff, Kong y el servicio) devuelve usuarios activos, servidores
+  creados y mensajes enviados en el período. Notification no guarda nada: pide los conteos en el momento a
+  Chat (mensajes y autores distintos) y a Server-Roles (servidores creados). Usuario activo = envió al menos
+  un mensaje, en un canal o por DM. Si uno no responde, devuelve el resto con `partial: true`.
 
   El backoffice muestra la versión staff y un link a Grafana. Grafana **no se embebe ni se publica**: la
   autorización del backoffice la hace el backend (ADR-002 del Gateway) y Grafana tiene su propio login.

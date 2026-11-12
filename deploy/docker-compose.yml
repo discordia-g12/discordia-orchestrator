@@ -428,6 +428,7 @@ services:
 
   notification-service:
     profiles: ["realtime"]
+    <<: *cross-node
     image: ${REGISTRY:-discordia}/notification-service:${NOTIFICATION_TAG:-local}
     build: ../Notification-Audit-Metrics-Service
     restart: unless-stopped
@@ -446,6 +447,11 @@ services:
       # una caída falsa mientras falten la regla de SG o el Gateway con /internal/readyz). Ver .env.example.
       - STATUS_GATEWAY_URL=${STATUS_GATEWAY_URL:-}
       - STATUS_TLS_INSECURE=true
+      # Métricas globales del backoffice (/api/v1/admin/metrics): pide los conteos a /internal/metrics/* de
+      # Chat (mismo nodo, por nombre) y de Server-Roles (nodo edge, por IP). Si alguno no responde, el dato
+      # sale en null con partial: true (ADR-05 de Notification).
+      - CHAT_ENGINE_URL=http://chat-engine-service:3000
+      - CORE_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8002
     depends_on:
       local-postgres:
         condition: service_healthy
