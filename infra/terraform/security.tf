@@ -31,7 +31,7 @@ locals {
     [
       # Temporal: Chat y Voice consultan can-send / can-connect hasta tener la foto de permisos por eventos
       { sg = "edge", port = 8002, protocol = "tcp", from = "realtime", cidr = null, description = "Server-Roles internal desde realtime" },
-      # Chat consulta id canónico y relación entre usuarios en cada mensaje directo
+      # Chat: id canonico y relaciones (inbox y DMs, ADR 0011)
       { sg = "edge", port = 8001, protocol = "tcp", from = "realtime", cidr = null, description = "Auth internal desde realtime" },
       # Notification arma el estado de la plataforma sondeando /internal/readyz/* de Kong (solo IPs privadas)
       { sg = "edge", port = 443, protocol = "tcp", from = "realtime", cidr = null, description = "Kong readyz internos desde Notification" },

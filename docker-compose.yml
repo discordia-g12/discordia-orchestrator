@@ -16,6 +16,7 @@ services:
       # Los destinos de los servicios usan los defaults de Gateway/render-config.sh (nombres de este compose).
       - KONG_ADMIN_LISTEN=0.0.0.0:8001
       - KONG_NGINX_WORKER_PROCESSES=1
+      - KONG_UNTRUSTED_LUA_SANDBOX_REQUIRES=gateway_health,auth0_validator,resty.openidc,resty.http,cjson.safe
     env_file:
       - ./Gateway/.env
     volumes:
@@ -45,8 +46,10 @@ services:
     image: redis:7-alpine
     container_name: discordia-gateway-redis
     restart: unless-stopped
-    # Contadores de rate limit: si se llena, perder los más viejos es aceptable.
-    command: ["redis-server", "--maxmemory", "40mb", "--maxmemory-policy", "allkeys-lru"]
+    # Contadores de rate limit y cuentas suspendidas (las escribe auth-service, las lee Kong). volatile-lru: si
+    # se llena descarta solo claves con TTL (contadores); la de cada email suspendido no tiene TTL y nunca se
+    # pierde (ADR-002 de Auth-User-Service).
+    command: ["redis-server", "--maxmemory", "40mb", "--maxmemory-policy", "volatile-lru"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -111,6 +114,15 @@ services:
       - AUTH0_DOMAIN=${AUTH0_DOMAIN:-dev-dppme5iaqg60gkmo.us.auth0.com}
       - AUTH0_CLIENT_ID=${AUTH0_CLIENT_ID:-f2H8PhlKDl3KSIm64G5mHAeQih7iFyIP}
       - AUTH0_DB_CONNECTION=Username-Password-Authentication
+
+      # Suspensión de usuarios (backoffice). Aplicación Machine to Machine de Auth0 (read:users, update:users):
+      # sin ella, suspender responde 503. La lista de suspendidos va al Redis del Gateway
+      - AUTH0_MGMT_CLIENT_ID=${AUTH0_MGMT_CLIENT_ID:-}
+      - AUTH0_MGMT_CLIENT_SECRET=${AUTH0_MGMT_CLIENT_SECRET:-}
+      - GATEWAY_REDIS_HOST=gateway-redis
+      - GATEWAY_REDIS_PORT=6379
+      # Vida del access token en la API de Auth0 (86400 s por defecto)
+      - SUSPENSION_DENYLIST_TTL_SECONDS=${SUSPENSION_DENYLIST_TTL_SECONDS:-86400}
 
       # Imágenes en S3. Sin S3_BUCKET la subida responde 503 (el resto anda igual).
       - AWS_REGION=${AWS_REGION:-us-east-1}
@@ -345,9 +357,12 @@ services:
       - PORT=3000
       - MONGO_URI=mongodb://chat-mongo:27017/chat_db
       - CORE_SERVICE_URL=http://server-roles-service:8080
+      - AUTH_SERVICE_URL=http://auth-service:8000
       - REDIS_URL=redis://chat-redis:6379
       - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@rabbitmq:5672/
       - NODE_OPTIONS=--max-old-space-size=192
+    volumes:
+      - chat-uploads-data:/usr/src/app/uploads
     depends_on:
       chat-mongo:
         condition: service_healthy
@@ -594,3 +609,4 @@ volumes:
   chat-mongo-data: null
   chat-redis-data: null
   rabbitmq-data: null
+  chat-uploads-data: null

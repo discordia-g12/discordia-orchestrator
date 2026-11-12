@@ -35,7 +35,7 @@
 | Historial del chat | **MongoDB Atlas M0** |
 | Mensajería | **RabbitMQ** en infra; eventos publicados con el patrón **Outbox** |
 | Audio de voz | **LiveKit** en realtime; el audio va directo por UDP 7882 (no pasa por Cloudflare) |
-| Avatares e íconos de servidor | **Bucket S3** `discordia-g12-media`: Auth y Server-Roles suben, los clientes leen directo del bucket ([ADR-003](../Auth-User-Service/docs/ADR-003-Avatares.md)) |
+| Avatares, íconos y banners de servidor | **Bucket S3** `discordia-g12-media`: Auth y Server-Roles suben (los banners van en `server-icons/banners/`), los clientes leen directo del bucket ([ADR-003](../Auth-User-Service/docs/ADR-003-Avatares.md)) |
 | Imágenes de contenedores | Cada repo las publica en **GHCR** desde su CI (tag = SHA del commit) |
 | Despliegue | **Automático desde `main`**: el CI de cada servicio le ordena a su nodo, por **SSM**, que despliegue la imagen nueva, con healthcheck y rollback. GitHub entra a AWS por **OIDC**, sin claves guardadas |
 | Ejecución | **Un solo `deploy/docker-compose.yml`** con un *profile* por nodo; cada EC2 levanta el suyo |
@@ -118,7 +118,7 @@ Cada nodo es una EC2 en la subnet pública de la VPC, con IP privada fija y su p
 |---|---|---|---|
 | `gateway` (Kong 3.4) | `ghcr.io/discordia-g12/gateway` | 443 → 8443 (TLS), 127.0.0.1:8000, 8100 (métricas, solo infra) | 256 MB |
 | `gateway-redis` | `redis:7-alpine` | — | 64 MB |
-| `auth-service` | `ghcr.io/discordia-g12/auth-service` | 8001 → 8000 (solo realtime) | 256 MB |
+| `auth-service` | `ghcr.io/discordia-g12/auth-service` | 8001 → 8000 (solo realtime: Chat, ADR 0011) | 256 MB |
 | `auth-outbox-worker` | misma imagen que Auth | — | 128 MB |
 | `server-roles-service` | `ghcr.io/discordia-g12/server-roles-service` | 8002 → 8080 (temporal, solo realtime) | 256 MB |
 | `server-roles-outbox-worker` | misma imagen que Server-Roles | — | 128 MB |
@@ -239,15 +239,15 @@ flowchart TB
 
 ### Puertos abiertos (Security Groups)
 
-Todo lo que no está en esta tabla está cerrado. El Admin API de Kong, el panel de RabbitMQ, Prometheus y
-Grafana **no se publican** (quedan en `127.0.0.1` del host; se accede con port forwarding de SSM). El 8001 del
-host es Auth; el Admin API de Kong usa el 8001 dentro de su contenedor y no sale de ahí.
+Todo lo que no está en esta tabla está cerrado. El Admin API de Kong (8001 dentro de su contenedor, no es el 8001
+del host, que es Auth), el panel de RabbitMQ,
+Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se accede con port forwarding de SSM).
 
 | Security Group | Puerto | Desde | Para qué |
 |---|---|---|---|
 | `discordia-edge` | 443/tcp | Rangos de Cloudflare | Kong (API y WebSockets) |
-| `discordia-edge` | 8002/tcp | grupo realtime | `access` / `can-connect` de Server-Roles (**temporal**) |
-| `discordia-edge` | 8001/tcp | grupo realtime | Chat → `/internal/*` de Auth (id canónico y relación entre usuarios, para los DMs) |
+| `discordia-edge` | 8002/tcp | grupo realtime | `access` / `can-connect` de Server-Roles (**temporal**) y conteos de las métricas globales |
+| `discordia-edge` | 8001/tcp | grupo realtime | Chat → Auth: id canónico y relaciones (inbox y DMs, ADR 0011) |
 | `discordia-edge` | 443/tcp | grupo realtime | Notification → `/internal/readyz/*` de Kong (estado de la plataforma; Kong solo acepta IPs privadas en esas rutas) |
 | `discordia-realtime` | 3000, 8082, 3001/tcp | grupo edge | Kong → Chat, Voice, Notification |
 | `discordia-realtime` | 7880/tcp | grupo edge | Kong → señalización de LiveKit (`/livekit`) |
@@ -291,11 +291,14 @@ host es Auth; el Admin API de Kong usa el 8001 dentro de su contenedor y no sale
 | Kong | Auth, Server-Roles | HTTP | mismo nodo (`auth-service:8000`, `server-roles-service:8080`) |
 | Kong | Chat (REST y WS), Voice (REST y `/ws/voice`), Notification, LiveKit | HTTP / WebSocket | `REALTIME_HOST:3000/8082/3001/7880` |
 | Kong | Payments | HTTP | `INFRA_HOST:8003` |
+| Chat | Auth `/internal/users/{id}/canonical` y `/internal/relations` | HTTP síncrono (timeout 2 s) | `EDGE_HOST:8001` — al abrir el inbox y en cada DM; si no responde, 503 |
 | Chat | Server-Roles `/internal/channels/{id}/access` | HTTP síncrono | `EDGE_HOST:8002` — al abrir cada WebSocket y al pedir el historial |
+| Chat | Server-Roles `/internal/servers/{id}/member-ids` | HTTP síncrono | `EDGE_HOST:8002` — al recibir `server.updated`, para avisar a los miembros por el inbox |
 | Voice | Server-Roles `/internal/channels/{id}/can-connect` | HTTP síncrono (timeout + 3 reintentos) | `EDGE_HOST:8002` — al unirse a voz |
-| Chat | Auth `/internal/users/{id}/canonical` y `/internal/relations` | HTTP síncrono (timeout; si falla, 503 sin entregar) | `EDGE_HOST:8001` — en cada mensaje directo y al abrir uno. Los canales no lo usan |
+| Notification | Chat `/internal/metrics/messages` | HTTP síncrono (timeout 2 s) | mismo nodo (`chat-engine-service:3000`) — métricas globales del backoffice; si no responde, ese dato sale en `null` |
+| Notification | Server-Roles `/internal/metrics/servers` | HTTP síncrono (timeout 2 s) | `EDGE_HOST:8002` — métricas globales del backoffice; si no responde, ese dato sale en `null` |
 | Auth / Server-Roles (workers) | RabbitMQ | AMQP (publica) | `INFRA_HOST:5672` |
-| Chat | RabbitMQ | AMQP (consume `member.*`) | `INFRA_HOST:5672` |
+| Chat | RabbitMQ | AMQP (consume `member.*`, `role.*`, `server.deleted`, `server.updated`, `channel.deleted`, `user.suspended`) | `INFRA_HOST:5672` |
 | Voice | RabbitMQ | AMQP (consume `member.banned`, `member.kicked`, `member.left`) | `INFRA_HOST:5672` |
 | Voice | LiveKit | API de servidor | mismo nodo (`livekit:7880`) |
 | LiveKit | Voice `/webhooks/livekit` | Webhook HTTP | mismo nodo |
@@ -336,11 +339,12 @@ que el cambio. Un worker aparte lo publica en RabbitMQ (al menos una vez; los co
 | Productor | Exchange (topic) | Eventos |
 |---|---|---|
 | Auth-User | `user.events` | `user.registered`, `user.profile.updated` |
-| Server-Roles | `server.events` | `channel.created/updated/deleted`, `channels.reordered`, `category.created/updated/deleted`, `categories.reordered`, `role.permissions_updated`, `role.deleted`, `member.role_assigned/removed`, `member.left`, `member.kicked`, `member.banned/unbanned`, `member.muted/unmuted` |
+| Server-Roles | `server.events` | `server.updated` (nombre, descripción, ícono o banner), `server.deleted`, `channel.created/updated/deleted`, `channels.reordered`, `category.created/updated/deleted`, `categories.reordered`, `role.permissions_updated`, `role.deleted`, `member.role_assigned/removed`, `member.left`, `member.kicked`, `member.banned/unbanned`, `member.muted/unmuted` |
 
 | Consumidor | Cola | Binding | Qué hace |
 |---|---|---|---|
 | Chat-Engine | `chat_engine_events` (durable) | `member.*` | ban / kick / salida → cierra el WebSocket; mute / unmute → habilita o bloquea el envío |
+| Chat-Engine | `chat_engine_events` (durable) | `server.updated` | Pide los miembros a Server-Roles y les manda `SERVER_UPDATED` por el inbox; el cliente vuelve a pedir sus servidores ([ADR 0013](../org-docs/docs/architecture/decisions/0013-cambios-de-servidor-en-vivo.md)) |
 | Voice-Signaling | `voice_signaling_events` (durable) | `member.banned`, `member.kicked`, `member.left` | Saca al usuario de la llamada de ese servidor y lo bloquea para que no vuelva a entrar con un token viejo |
 
 **Ver y escribir son permisos distintos** en el chat: `/internal/channels/{id}/access` responde 403 si el
@@ -455,7 +459,7 @@ cuando vuelve a pasar por `/join` (que chequea `can-connect`).
 |---|---|---|
 | `auth_db` | RDS | La usa Auth-User (edge) |
 | `server_roles_db` | RDS | La usa Server-Roles (edge) |
-| `notification_db` | RDS | La usa Notification (realtime) |
+| `notification_db` | RDS | La usa Notification (realtime): `incidents` y `audit_logs`, creadas por sus migraciones al arrancar ([ADR-03](../Notification-Audit-Metrics-Service/docs/ADR-03-Incidentes-y-migraciones.md)) |
 | `payments_db` | RDS | La usa Payments (infra) |
 | Historial del chat y conversaciones directas | MongoDB Atlas M0 | En local, `chat-mongo` (profile `local`) |
 | Amistades, solicitudes de amistad y bloqueos | `auth_db` (RDS) | `friendships`, `friend_requests`, `user_blocks`, siempre con el id canónico |
@@ -463,7 +467,7 @@ cuando vuelve a pasar por `/join` (que chequea `can-connect`).
 | Íconos de servidor | S3 `discordia-g12-media/server-icons/` | Los sube Server-Roles; la URL queda en `server_roles_db` (`servers.icon_url`) |
 | Sesiones de voz, presencia | `voice-redis` (realtime) | Local al nodo |
 | Pub/sub del chat, inbox de DMs y presencia | `chat-redis` (realtime) | `noeviction` |
-| Rate limiting | `gateway-redis` (edge) | `allkeys-lru` |
+| Rate limiting y cuentas suspendidas | `gateway-redis` (edge) | `volatile-lru`: las suspensiones las escribe Auth y las lee Kong; la clave por email no tiene TTL y nunca se descarta ([ADR-002 de Auth-User](../Auth-User-Service/docs/ADR-002-Suspension-Usuarios.md)) |
 | Eventos | RabbitMQ (infra) | Volumen persistente `rabbitmq-data` |
 
 - **Una base por servicio, en una sola instancia**: ningún servicio lee la base de otro (se hablan por
@@ -499,7 +503,9 @@ volumen vacío). Si después se cambia el valor en `nodes.env`, hay que cambiarl
 | `/api/v1/voice`, `/ws/voice` | Voice-Signaling | JWT |
 | `/livekit` | LiveKit (señalización, sin el prefijo) | token propio de LiveKit |
 | `/api/v1/payments`, `/points`, `/boosts` | Payments | JWT + rate limit |
-| `/api/v1/notifications`, `/audit`, `/metrics`, `/status` | Notification | JWT (algunas solo staff, [ADR-002](../Gateway/docs/ADR-002-Rol-Staff-Backoffice.md)) |
+| `/api/v1/notifications` | Notification | JWT |
+| `/api/v1/audit`, `/metrics`, `/admin/status`, `/admin/incidents`, `/admin/metrics` | Notification | JWT + rol staff ([ADR-002](../Gateway/docs/ADR-002-Rol-Staff-Backoffice.md)) |
+| `/api/v1/status` | Notification | pública (estado e incidentes activos) |
 | `/livez`, `/readyz` | Kong | pública |
 
 - En producción (`deploy/gateway.env`): TLS con el Origin Certificate (`KONG_SSL_CERT`), `KONG_TRUSTED_IPS`
@@ -529,7 +535,7 @@ volumen vacío). Si después se cambia el valor en `nodes.env`, hay que cambiarl
 | Se cae | Sigue funcionando | Deja de funcionar |
 |---|---|---|
 | **infra** | Login, servidores, canales, chat y voz | Payments; eventos en vivo (bans y mutes se aplican al volver: quedan en la cola o en el outbox); métricas |
-| **realtime** | Login, servidores, canales, roles, Payments | Chat, voz, notificaciones |
+| **realtime** | Login, servidores, canales, roles, Payments | Chat, voz, notificaciones, estado y métricas globales del backoffice |
 | **edge** | Nada desde afuera (es la única entrada) | Toda la API. Los WebSockets abiertos se cortan |
 | **RDS** | Chat ya abierto (mensajes en Atlas) y voz ya conectada | Login, servidores, canales, permisos (nuevos WebSockets y joins de voz fallan en `access` / `can-connect`), notificaciones y Payments |
 | **S3** | Todo lo demás | Subir avatar y crear un servidor con ícono (503, sin dejar nada a medias); las imágenes no se ven |
@@ -577,8 +583,20 @@ primeros van a Prometheus; el de negocio no (sale de eventos que consume Notific
   `node` y `service`) y *Comportamiento*.
 - **Estado de la plataforma** (historia 74): Notification sondea cada 15 s los `/readyz` de todos los
   servicios a través de Kong (`/internal/readyz/*`, solo IPs privadas) y los sirve desde memoria:
-  - `GET /api/v1/status` es público y solo da el estado;
-  - `GET /api/v1/admin/status` es staff (Kong y el servicio) y suma la latencia y el motivo.
+  - `GET /api/v1/status` es público: da el estado combinado con los incidentes activos (operativo, degradado o
+    en mantenimiento) y los incidentes;
+  - `GET /api/v1/admin/status` es staff (Kong y el servicio) y suma la latencia y el motivo;
+  - `/api/v1/admin/incidents` (staff) publica, lista y resuelve incidentes, guardados en `notification_db` con
+    su registro en `audit_logs` ([ADR-03](../Notification-Audit-Metrics-Service/docs/ADR-03-Incidentes-y-migraciones.md)).
+
+  La web consulta el estado público cada 60 s y muestra un aviso mientras haya incidentes activos. El
+  backoffice sugiere publicar uno cuando un servicio queda degradado y ningún incidente lo cubre.
+
+- **Métricas globales** (backoffice, [ADR 0014](../org-docs/docs/architecture/decisions/0014-metricas-globales-de-la-plataforma.md)):
+  `GET /api/v1/admin/metrics?from&to` (staff, Kong y el servicio) devuelve usuarios activos, servidores
+  creados y mensajes enviados en el período. Notification no guarda nada: pide los conteos en el momento a
+  Chat (mensajes y autores distintos) y a Server-Roles (servidores creados). Usuario activo = envió al menos
+  un mensaje, en un canal o por DM. Si uno no responde, devuelve el resto con `partial: true`.
 
   El backoffice muestra la versión staff y un link a Grafana. Grafana **no se embebe ni se publica**: la
   autorización del backoffice la hace el backend (ADR-002 del Gateway) y Grafana tiene su propio login.
@@ -686,6 +704,11 @@ script en el nodo.
 
 Los healthchecks de los servicios en el compose usan `/readyz`: un servicio que arranca pero no llega a su base o a RabbitMQ
 no queda `healthy`, y el deploy vuelve atrás.
+
+**Migraciones.** Auth-User corre `alembic upgrade head`; Notification aplica las suyas al arrancar, antes de
+escuchar ([ADR-03](../Notification-Audit-Metrics-Service/docs/ADR-03-Incidentes-y-migraciones.md)). Si una
+falla, el contenedor no queda `healthy` y el deploy vuelve al tag anterior. El rollback no deshace el esquema:
+las migraciones tienen que ser aditivas para que la imagen anterior siga arrancando.
 
 ### Deploy de la configuración
 
@@ -866,6 +889,7 @@ curl -i localhost:8000/livez
 | Un RDS con una base por servicio | Postgres en contenedor por nodo; un RDS por servicio | Uno por servicio cuadruplicaría el costo. Contra: punto único de falla (sección 9) |
 | Una VPC con un Security Group por nodo | Una VPC por nodo + peering | Los tres nodos están en la misma cuenta, así que las VPCs separadas solo sumaban peerings y rutas. El aislamiento entre nodos lo dan los Security Groups igual |
 | RDS movido a la VPC de los nodos | Dejarlo en su VPC + peering | Sin peering ni rutas; la base queda en subnets sin salida a internet y solo la ven los tres nodos |
+| Cambios de configuración del servidor por el inbox de cada miembro (`server.updated` → Chat → `SERVER_UPDATED`) | Avisar por el WebSocket de canal; polling de la lista de servidores | El socket de canal no le llega a quien está en otro servidor, y la barra muestra todos. El evento lleva solo el id y el cliente vuelve a pedir (ADR 0013) |
 | S3 para avatares e íconos, subida a través del servicio | Cloudinary; presigned POST; rol IAM de la EC2 | Un solo proveedor (AWS, mismos créditos y budget); el servicio valida y normaliza la imagen; un usuario IAM por servicio lo deja desplegable en cualquier nodo (ADR-003) |
 | Cloudflare Pages | Vercel | Vercel desaconseja un proxy adelante; Pages convive con la nube naranja |
 | Cloudflare proxy en `api` | DNS directo / Vercel rewrites | Oculta la IP, TLS gratis, anti-DDoS. Vercel no soporta WebSockets hacia afuera |

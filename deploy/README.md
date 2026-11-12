@@ -4,7 +4,7 @@ Un solo compose (`deploy/docker-compose.yml`) para los tres nodos, igual en loca
 
 | Nodo (profile) | Red | Servicios | Puertos publicados (para los otros nodos) |
 |---|---|---|---|
-| `edge` | `edge` | Kong + Redis, Auth (+worker), Server-Roles (+worker) | 443/8443 (Kong), 8001 (Auth internal, solo para realtime), 8002 (Server-Roles internal), 8100 (métricas de Kong, solo para infra) |
+| `edge` | `edge` | Kong + Redis, Auth (+worker), Server-Roles (+worker) | 443/8443 (Kong), 8001 (Auth internal, para Chat), 8002 (Server-Roles internal), 8100 (métricas de Kong, solo para infra) |
 | `realtime` | `realtime` | Chat + Redis, Voice + Redis, LiveKit, Notification | 3000, 8082, 3001, 7880, 7881, 7882/udp |
 | `infra` | `infra` | RabbitMQ, Payments, Prometheus, Grafana | 5672, 8003 |
 | los tres | (default) | Node Exporter, cAdvisor (métricas de la máquina y de sus contenedores) | 9100, 9180 (solo para infra) |
@@ -42,6 +42,11 @@ En producción, orden de puesta en marcha:
 3. Recién entonces, `STATUS_GATEWAY_URL=https://10.0.1.10:443` en el `nodes.env` de realtime.
 
 Si se agrega antes, el estado público muestra una caída falsa.
+
+**Métricas globales:** Notification arma `/api/v1/admin/metrics` (solo staff) pidiendo los conteos a
+`/internal/metrics/*` de Chat (`CHAT_ENGINE_URL`, mismo nodo) y de Server-Roles (`CORE_SERVICE_URL`, el 8002
+de edge). No hay variable nueva en `nodes.env`: salen de `EDGE_HOST`, y la regla edge 8002 desde realtime ya
+existe. Si uno de los dos no responde, el dato sale vacío y el resto se muestra igual.
 
 **Cada nodo tiene su propia red de Docker.** Los contenedores de un nodo se ven por nombre entre ellos,
 pero no ven los de otro nodo: lo que cruza de un nodo a otro va a la IP del host y al puerto publicado,
