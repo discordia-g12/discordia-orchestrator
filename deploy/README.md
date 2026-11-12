@@ -107,6 +107,9 @@ y el job de GitHub falla. Cada deploy queda en `/var/log/discordia-deploy.log` d
 Los dos corren como root, toman el mismo lock (un deploy por vez en cada nodo) y aceptan solo el SHA
 completo (40 caracteres).
 
+El CD no aplica Terraform. Un puerto nuevo entre nodos necesita `terraform apply` antes del deploy: sin la
+regla edge:8001, Chat no llega a Auth y los DMs fallan cerrados (503), aunque los canales sigan andando.
+
 ### Preparar un nodo nuevo (una sola vez)
 
 1. Entrar por SSM (`terraform output ssm_connect`) y clonar el orquestador en `main`, con submódulos, en

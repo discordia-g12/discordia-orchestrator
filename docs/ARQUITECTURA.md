@@ -381,6 +381,44 @@ sequenceDiagram
     CH-->>U: cierra el WebSocket (4003)
 ```
 
+### Mensaje directo
+
+Decisión completa en
+[ADR 0011](../org-docs/docs/architecture/decisions/0011-mensajes-directos.md). Un DM usa las rutas de canal
+con un id `dm-<ObjectId>`: `channelAccessGuard` valida que sea participante y no consulta a Server-Roles. La
+relación se revisa en cada envío, nunca se cachea en el socket.
+
+```mermaid
+sequenceDiagram
+    participant A as Emisor
+    participant K as Kong
+    participant CH as Chat (realtime)
+    participant AU as Auth (edge)
+    participant M as Atlas
+    participant R as chat-redis
+    participant B as Destinatario
+
+    A->>K: POST /api/v1/chat/channels/dm-…/messages
+    K->>CH: X-User-Id
+    CH->>AU: GET /internal/users/{id}/canonical
+    CH->>AU: GET /internal/relations?actor=…&other=…
+    AU-->>CH: friends, blocked_by_actor, blocked_by_other, suspended
+    alt bloqueo o cuenta suspendida
+        CH-->>A: 403 DM_NOT_DELIVERABLE (genérico)
+    else conversación sin aceptar
+        CH-->>A: 403 DM_PENDING
+    else entregable
+        CH->>M: guarda el mensaje y actualiza la conversación
+        CH->>R: publica en inbox:<usuario> y en el canal dm-…
+        R-->>B: DM_MESSAGE por /inbox/ws (si está conectado)
+        CH-->>A: 201
+    end
+```
+
+Si el destinatario no está conectado, el mensaje queda en Atlas y aparece en `unreadCount` de
+`GET /conversations`, que el cliente vuelve a pedir al reconectar. La presencia es una clave en `chat-redis`
+con TTL de 60 s que renueva el heartbeat del inbox.
+
 ### Voz
 
 ```mermaid
@@ -423,11 +461,12 @@ cuando vuelve a pasar por `/join` (que chequea `can-connect`).
 | `server_roles_db` | RDS | La usa Server-Roles (edge) |
 | `notification_db` | RDS | La usa Notification (realtime): `incidents` y `audit_logs`, creadas por sus migraciones al arrancar ([ADR-03](../Notification-Audit-Metrics-Service/docs/ADR-03-Incidentes-y-migraciones.md)) |
 | `payments_db` | RDS | La usa Payments (infra) |
-| Historial del chat | MongoDB Atlas M0 | En local, `chat-mongo` (profile `local`) |
+| Historial del chat y conversaciones directas | MongoDB Atlas M0 | En local, `chat-mongo` (profile `local`) |
+| Amistades, solicitudes de amistad y bloqueos | `auth_db` (RDS) | `friendships`, `friend_requests`, `user_blocks`, siempre con el id canónico |
 | Avatares | S3 `discordia-g12-media/avatars/` | Los sube Auth; la URL queda en `auth_db` (`user_profiles.avatar_url`) |
 | Íconos de servidor | S3 `discordia-g12-media/server-icons/` | Los sube Server-Roles; la URL queda en `server_roles_db` (`servers.icon_url`) |
 | Sesiones de voz, presencia | `voice-redis` (realtime) | Local al nodo |
-| Pub/sub del chat | `chat-redis` (realtime) | `noeviction` |
+| Pub/sub del chat, inbox de DMs y presencia | `chat-redis` (realtime) | `noeviction` |
 | Rate limiting y cuentas suspendidas | `gateway-redis` (edge) | `volatile-lru`: las suspensiones las escribe Auth y las lee Kong; la clave por email no tiene TTL y nunca se descarta ([ADR-002 de Auth-User](../Auth-User-Service/docs/ADR-002-Suspension-Usuarios.md)) |
 | Eventos | RabbitMQ (infra) | Volumen persistente `rabbitmq-data` |
 
@@ -513,11 +552,13 @@ Mecanismos:
   no-ready (para no propagar una caída de infra).
 - **Outbox**: si RabbitMQ no está, los eventos esperan en la base del productor (en el RDS).
 - **Voice → Server-Roles**: timeout de 2 s y 3 intentos; si no responde, el join da 503 (ADR-03 de Voice).
+- **Chat → Auth**: los DMs **fallan cerrados**: si Auth no responde, 503 y no se entrega nada. Los canales no
+  dependen de Auth y siguen funcionando.
 - **`restart: unless-stopped`** y healthchecks en todos los contenedores.
 
-**Dependencia síncrona que queda**: Chat y Voice consultan a Server-Roles (edge) al abrir un WebSocket o
-unirse a voz. Si edge cae, ya no importa (tampoco hay API). Se puede eliminar con la "foto de permisos por
-eventos" (pendiente, P1 en `DEUDA-TECNICA.md`).
+**Dependencias síncronas que quedan**: Chat y Voice consultan a Server-Roles (edge) al abrir un WebSocket o
+unirse a voz, y Chat consulta a Auth (edge) en cada DM. Si edge cae, ya no importa (tampoco hay API). La de
+Server-Roles se puede eliminar con la "foto de permisos por eventos" (pendiente, P1 en `DEUDA-TECNICA.md`).
 
 ---
 
@@ -795,6 +836,9 @@ Entrar a un nodo: `aws ssm start-session --target <id>` (`terraform output ssm_c
   segundos), ese servicio no responde. Los clientes reconectan el WebSocket solos.
 - **El estado de Terraform es local** (deuda I1 en `DEUDA-TECNICA.md`): el rol `discordia-cd` lo aplica
   quien tiene el `terraform.tfstate`.
+- **El puerto 8001 necesita `terraform apply` antes del deploy.** El CD no aplica Terraform: si el compose con
+  `AUTH_SERVICE_URL` llega a realtime sin la regla en el Security Group, los DMs fallan cerrados (503). Los
+  canales no se enteran.
 
 ### Terraform
 

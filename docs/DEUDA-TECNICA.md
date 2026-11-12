@@ -10,8 +10,8 @@ Al cerrar un ítem, borrarlo de acá (y mencionarlo en el PR).
 | Prioridad | Ítems | Por qué |
 |-----------|-------|---------|
 | **Alta** | R2 | Una dependencia sin fijar ya tiró un servicio |
-| **Media** | C1, V2, D1, D2, L1, L2, I1 | Permisos que no se actualizan en vivo, usuario maestro compartido, TLS sin validar, archivos de ejemplo desactualizados, estado de Terraform en una sola máquina |
-| **Baja** | R1, P1, P2, V3, V4, C3, C4, I2 | Payments todavía no tiene funcionalidad, mejoras de diseño, limpieza después del deploy, o solo hacen falta si el sistema crece |
+| **Media** | C1, V2, D1, D2, L1, L2, I1, M1, M6 | Permisos que no se actualizan en vivo, usuario maestro compartido, TLS sin validar, archivos de ejemplo desactualizados, estado de Terraform en una sola máquina, puertos internos sin autenticación, identidad partida por alias |
+| **Baja** | R1, P1, P2, V3, V4, C3, C4, I2, M2, M3, M4, M5, M7 | Payments todavía no tiene funcionalidad, mejoras de diseño, limpieza después del deploy, o solo hacen falta si el sistema crece |
 
 ---
 
@@ -60,6 +60,20 @@ Verificación: el CI de cada repo en verde y levantar `deploy/docker-compose.yml
 | C1 | **Aplicar en vivo los cambios de rol** | `EventConsumer` solo se suscribe a `member.*` y solo maneja `banned`, `kicked`, `left`, `muted` y `unmuted`. Si a alguien le sacan un rol (`member.role_removed`) o un rol pierde `SEND_MESSAGES` (`role.permissions_updated`, `role.deleted`), la sesión abierta sigue con `canSend: true` hasta que reconecta. Para `member.role_*` alcanza con volver a llamar a `/internal/channels/{id}/access` para las sesiones de ese usuario en ese servidor y mandar `PERMISSIONS_UPDATED` con el `canSend` nuevo (y cerrar la sesión si ya no puede ver el canal). Para `role.*` el evento no trae `user_id` (hoy `handleEvent` lo descarta): o se rechequean todas las sesiones del servidor, o Server-Roles agrega la lista de usuarios afectados al payload. Lo mismo pasa con `channel.deleted`: las sesiones de un canal borrado quedan abiertas. |
 | C3 | Más de una instancia del chat | Hoy hay una sola. Si se agregan más hacen falta dos cosas: una cola por instancia (`RABBITMQ_QUEUE` distinto, idealmente `exclusive`/`auto-delete` con el nombre del contenedor) porque `chat_engine_events` es compartida y cada evento le llega a una sola instancia, y el pub/sub de Redis para repartir los mensajes, porque hoy el broadcast es solo a los sockets de la misma instancia (`SessionManager` en memoria; el cliente Redis ya está creado pero no se usa para eso). |
 | C4 | Límite del historial | `limit` viene de la query sin tope (`?limit=1000000` le pide todo el canal a Atlas M0) y `getMissedMessages` no tiene límite. Poner un máximo (ej. 100) y validar `before` / `last_message_id_seen` como ObjectId. |
+
+## Mensajes directos (Auth, Chat, Server-Roles y clientes)
+
+Contexto: [ADR 0011](../org-docs/docs/architecture/decisions/0011-mensajes-directos.md).
+
+| # | Qué falta | Detalle |
+|---|-----------|---------|
+| M1 | **Rate limit de solicitudes de amistad** | `POST /users/me/friend-requests` solo tiene el límite general de Kong: se puede usar para mandar solicitudes en masa. Agregar un límite por usuario en Kong o en Auth. También `/internal` de Auth y de Server-Roles: no tienen autenticación, los protege solo el Security Group, y el 8001 y el 8002 exponen toda la API, que confía en `X-User-Id`. Ver P1. |
+| M2 | Solicitudes en tiempo real | Las solicitudes de amistad se piden cada 30 s y al volver a la app. Quien recibe una puede tardar hasta 30 s en verla, y lo mismo vale para un chat al que no se podía escribir: a quien desbloquean, el composer le vuelve con ese polling. Publicar el cambio por `inbox:<usuario>`, para lo que Auth tendría que avisarle a Chat. |
+| M3 | Push a mobile | Con la app cerrada no llega nada: el mensaje se ve al volver. Hace falta guardar tokens de dispositivo y un sender (Expo Push o APNs + FCM), probablemente en Notification. |
+| M4 | `202` vs `201` deja inferir un bloqueo | Una solicitud a quien te bloqueó responde `202` y no aparece en `outgoing`; a alguien que no bloqueó, por username, `201`. En la interfaz se ven igual, pero a nivel API se puede deducir. Para taparlo, Auth tendría que guardar una solicitud "fantasma" que solo vea quien la mandó. |
+| M5 | Adjuntos en el primer mensaje | `POST /channels/:id/attachments` exige un id `dm-…`, que no existe antes del primer mensaje, y los clientes no ofrecen adjuntar en un chat nuevo. `POST /conversations` ya acepta `attachments`: falta dónde subirlos antes de tener conversación (por ejemplo, un prefijo por usuario). |
+| M6 | Servidores en común y baneos con alias | Core guarda el `sub` crudo en `server_members`, `server_bans` y `servers.owner_id`, y nadie usa `/users/resolve-identity`. Con login federado, una misma persona puede tener membresías bajo dos ids: `GET /servers/mutual` da falsos negativos (nunca filtra de más) y un baneo bajo un id no alcanza al otro. Los clientes piden servidores en común con el id con el que se abrió el perfil, para que un alias no los pierda. Resolverlo en Kong o migrar Core al id canónico. |
+| M7 | Tests de `tests/test_deps.py` en Auth | 12 de 13 fallan con `AttributeError`: llaman a `get_authenticated_identity` directo, sin `x_user_role`, y reciben el `Header(...)` por defecto en lugar de un string. Vienen de la suspensión de usuarios, no de los DMs. Es el test el que hay que corregir: el rol llega bien por HTTP. |
 
 ## Voz (Voice-Signaling-Session-Service)
 
