@@ -358,6 +358,9 @@ services:
       # Señalización por Kong. Producción: wss://api.discordia.lol/livekit
       - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL:-ws://localhost:8000/livekit}
       - CORE_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8002
+      # Llamadas privadas: call-access, id canónico y aviso por el inbox contra /internal/* de Chat (mismo
+      # nodo, por nombre). Sin Chat, iniciar o aceptar una llamada responde 503; cortar sigue andando (ADR-04)
+      - CHAT_SERVICE_URL=http://chat-engine-service:3000
       # Eventos member.banned / kicked / left (nodo infra): saca al usuario de la llamada
       - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@${INFRA_HOST:-host.docker.internal}:5672/
       - RABBITMQ_EXCHANGE=server.events
