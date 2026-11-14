@@ -10,8 +10,8 @@ Al cerrar un ítem, borrarlo de acá (y mencionarlo en el PR).
 | Prioridad | Ítems | Por qué |
 |-----------|-------|---------|
 | **Alta** | R2 | Una dependencia sin fijar ya tiró un servicio |
-| **Media** | C1, V2, D1, D2, L1, L2, I1, M1, M6 | Permisos que no se actualizan en vivo, usuario maestro compartido, TLS sin validar, archivos de ejemplo desactualizados, estado de Terraform en una sola máquina, puertos internos sin autenticación, identidad partida por alias |
-| **Baja** | R1, P1, P2, V3, V4, C3, C4, I2, M2, M3, M4, M5, M7 | Payments todavía no tiene funcionalidad, mejoras de diseño, limpieza después del deploy, o solo hacen falta si el sistema crece |
+| **Media** | C1, V2, D1, D2, L1, L2, I1, M1, M6, V9 | Permisos que no se actualizan en vivo, usuario maestro compartido, TLS sin validar, archivos de ejemplo desactualizados, estado de Terraform en una sola máquina, puertos internos sin autenticación, identidad partida por alias |
+| **Baja** | R1, P1, P2, V3, V4, V5, V6, V7, V8, C3, C4, I2, M2, M3, M4, M5, M7 | Payments todavía no tiene funcionalidad, mejoras de diseño, limpieza después del deploy, o solo hacen falta si el sistema crece |
 
 ---
 
@@ -82,6 +82,17 @@ Contexto: [ADR 0011](../org-docs/docs/architecture/decisions/0011-mensajes-direc
 | V2 | El mute no aplica a la voz | `can-connect` no mira `ServerMute` ni `SPEAK`, y el token siempre lleva `canPublish: true`. Un muteado, o alguien sin `SPEAK`, puede hablar. Devolver los permisos en la respuesta de `can-connect` y usar `canPublish` según `SPEAK` y mute. El consumidor de eventos de Voice ya existe (`modules/voice/events.ts`): sumar los bindings `member.muted` / `member.unmuted` y cambiar el permiso en vivo con `roomService.updateParticipant`. |
 | V3 | Llamadas abiertas antes del deploy del consumidor | Voice guarda de qué servidor es cada llamada recién desde `/join` con la versión nueva (`user:{id}:voice_server`). A quien ya estaba en una llamada al desplegar, un ban no lo saca hasta que vuelva a entrar. Se resuelve solo en cuanto todos vuelven a unirse; no hace falta migrar nada. |
 | V4 | Evento que falla al aplicarse | Si Redis o LiveKit fallan mientras se procesa un ban, el evento se descarta (no se reencola para no entrar en loop). El bloqueo suele quedar guardado igual (es lo primero que se escribe), pero el usuario sigue en la llamada actual. Si pasa seguido, reencolar con un límite de reintentos (header `x-death` con una dead-letter queue). |
+
+Llamadas privadas (#50): contexto en [ADR 0015](../org-docs/docs/architecture/decisions/0015-llamadas-privadas.md)
+y en el ADR-04 de Voice-Signaling-Session-Service.
+
+| # | Qué falta | Detalle |
+|---|-----------|---------|
+| V5 | Timer del timbre en memoria | El `setTimeout` de 30 s vive en la instancia que atendió el inicio. Si Voice se reinicia mientras suena (un deploy), nadie publica `CALL_ENDED` con `missed`: el TTL de 45 s de `call:<id>` libera el ocupado y el cliente da la llamada por perdida a los `expiresAt + 10 s`. Con más de una instancia de Voice pasa lo mismo. Para escalar, un barrido periódico de llamadas vencidas con el mismo compare-and-set (y mover también la presencia, ADR-02 de Voice). |
+| V6 | Un bloqueo no corta una llamada activa | `call-access` se consulta al iniciar y al aceptar. Si uno bloquea al otro durante la llamada, sigue hasta que alguien corte. Para cortarla, Auth tendría que avisar el bloqueo (hoy no publica eventos de relaciones, ver M2) y Voice terminarla con `unavailable`. |
+| V7 | Sin aviso con la app cerrada | La llamada suena solo si el inbox está conectado. Es el mismo push que falta para los DM (M3), con un requisito más: en mobile, una llamada entrante necesita notificación de alta prioridad (CallKit / ConnectionService) para sonar con el teléfono bloqueado. |
+| V8 | La llamada no queda en el chat | Ni "llamada perdida" ni la duración aparecen en la conversación: quien no estaba conectado no se entera de que lo llamaron. Voice podría pedirle a Chat que guarde un mensaje de sistema al terminar (otro endpoint interno), con cuidado de no contarlo como no leído de quien llamó. |
+| V9 | `POST /internal/inbox/events` de Chat protegido solo por red | Quien llegue al 3000 de realtime sin pasar por Kong puede publicar un `CALL_*` en el inbox de cualquiera (por Kong responde 404). Mismo caso que el resto de `/internal` (M1, P1): un secreto compartido entre servicios o mTLS lo cerraría para todos. |
 
 ## Permisos entre servicios
 

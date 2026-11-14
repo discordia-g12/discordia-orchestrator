@@ -295,11 +295,13 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 | Chat | Server-Roles `/internal/channels/{id}/access` | HTTP síncrono | `EDGE_HOST:8002` — al abrir cada WebSocket y al pedir el historial |
 | Chat | Server-Roles `/internal/servers/{id}/member-ids` | HTTP síncrono | `EDGE_HOST:8002` — al recibir `server.updated`, para avisar a los miembros por el inbox |
 | Voice | Server-Roles `/internal/channels/{id}/can-connect` | HTTP síncrono (timeout + 3 reintentos) | `EDGE_HOST:8002` — al unirse a voz |
+| Voice | Chat `/internal/conversations/{id}/call-access`, `/internal/users/{id}/canonical` | HTTP síncrono (timeout 2 s, 3 intentos) | mismo nodo (`chat-engine-service:3000`) — al iniciar, aceptar, rechazar o cortar una llamada privada; si no responde, iniciar y aceptar dan 503 |
+| Voice | Chat `/internal/inbox/events` | HTTP síncrono (timeout 2 s, sin reintento) | mismo nodo — avisa `CALL_RINGING` / `CALL_ACCEPTED` / `CALL_ENDED` por el inbox de los dos |
 | Notification | Chat `/internal/metrics/messages` | HTTP síncrono (timeout 2 s) | mismo nodo (`chat-engine-service:3000`) — métricas globales del backoffice; si no responde, ese dato sale en `null` |
 | Notification | Server-Roles `/internal/metrics/servers` | HTTP síncrono (timeout 2 s) | `EDGE_HOST:8002` — métricas globales del backoffice; si no responde, ese dato sale en `null` |
 | Auth / Server-Roles (workers) | RabbitMQ | AMQP (publica) | `INFRA_HOST:5672` |
 | Chat | RabbitMQ | AMQP (consume `member.*`, `role.*`, `server.deleted`, `server.updated`, `channel.deleted`, `user.suspended`) | `INFRA_HOST:5672` |
-| Voice | RabbitMQ | AMQP (consume `member.banned`, `member.kicked`, `member.left`) | `INFRA_HOST:5672` |
+| Voice | RabbitMQ | AMQP (consume `member.banned`, `member.kicked`, `member.left`, `user.suspended`) | `INFRA_HOST:5672` |
 | Voice | LiveKit | API de servidor | mismo nodo (`livekit:7880`) |
 | LiveKit | Voice `/webhooks/livekit` | Webhook HTTP | mismo nodo |
 | Prometheus | Exportadores de los 3 nodos | HTTP (scrape) | `<NODO>_HOST:9100/9180` |
@@ -346,6 +348,7 @@ que el cambio. Un worker aparte lo publica en RabbitMQ (al menos una vez; los co
 | Chat-Engine | `chat_engine_events` (durable) | `member.*` | ban / kick / salida → cierra el WebSocket; mute / unmute → habilita o bloquea el envío |
 | Chat-Engine | `chat_engine_events` (durable) | `server.updated` | Pide los miembros a Server-Roles y les manda `SERVER_UPDATED` por el inbox; el cliente vuelve a pedir sus servidores ([ADR 0013](../org-docs/docs/architecture/decisions/0013-cambios-de-servidor-en-vivo.md)) |
 | Voice-Signaling | `voice_signaling_events` (durable) | `member.banned`, `member.kicked`, `member.left` | Saca al usuario de la llamada de ese servidor y lo bloquea para que no vuelva a entrar con un token viejo |
+| Voice-Signaling | `voice_signaling_events` (durable) | `user.suspended` (`user.events`) | Saca la cuenta de los canales de voz y termina su llamada privada (`unavailable`) |
 
 **Ver y escribir son permisos distintos** en el chat: `/internal/channels/{id}/access` responde 403 si el
 usuario no es miembro, está baneado o no tiene `VIEW_CHANNELS`. Si puede ver, devuelve `can_send`
@@ -451,6 +454,58 @@ servidor, y guarda un bloqueo (`voice:blocked:{servidor}:{usuario}`, 24 h). Si e
 de ese servidor con un token emitido antes, el webhook `participant_joined` lo saca. El bloqueo se borra
 cuando vuelve a pasar por `/join` (que chequea `can-connect`).
 
+### Llamada privada
+
+Decisión completa en
+[ADR 0015](../org-docs/docs/architecture/decisions/0015-llamadas-privadas.md). Una llamada 1 a 1 es una
+sala de LiveKit `call-<id>` de 2 personas, separada de los canales de voz. Voice no decide si se puede llamar:
+le pregunta a Chat, que aplica las mismas reglas que a un DM, y el aviso viaja por el inbox de Chat.
+
+```mermaid
+sequenceDiagram
+    participant A as Quien llama
+    participant K as Kong
+    participant V as Voice (realtime)
+    participant CH as Chat (realtime)
+    participant VR as voice-redis
+    participant LK as LiveKit (realtime)
+    participant B as Quien recibe
+
+    A->>K: POST /api/v1/voice/calls (conversationId)
+    K->>V: + X-User-Id
+    V->>CH: GET /internal/conversations/dm-…/call-access
+    alt bloqueo, cuenta suspendida o conversación sin aceptar
+        CH-->>V: 403 DM_NOT_DELIVERABLE / DM_PENDING
+        V-->>A: 403 (mismo error que un DM)
+    else puede llamar
+        CH-->>V: 200 + ids canónicos de los dos
+        V->>VR: reserva el ocupado de los dos y crea call:<id> (Lua)
+        V->>LK: createRoom call-<id> (máx. 2)
+        V->>CH: POST /internal/inbox/events CALL_RINGING
+        CH-->>B: CALL_RINGING por /inbox/ws (todos sus dispositivos)
+        V-->>A: 201 + token (solo micrófono), entra a la sala
+        B->>K: POST /api/v1/voice/calls/{id}/accept
+        V->>CH: call-access otra vez (bloqueo mientras sonaba)
+        V->>VR: ringing → active (compare-and-set)
+        V->>CH: CALL_ACCEPTED a los dos
+        V-->>B: 200 + token, entra a la sala
+        A-->>LK: audio (directo, como en canales)
+        B-->>LK: audio
+    end
+
+    Note over A,B: Cualquiera corta, B rechaza o pasan 30 s sin respuesta
+    V->>VR: → ended (ended / declined / missed) y libera el ocupado
+    V->>LK: deleteRoom
+    V->>CH: CALL_ENDED a los dos (motivo en call.endReason)
+```
+
+- **Ocupado:** si cualquiera de los dos ya tiene una llamada sonando o activa, `409 CALL_BUSY`.
+- **Sin cortar:** si alguien se va de la sala (cerró la pestaña, se quedó sin red), el webhook de LiveKit la
+  termina (`canceled` si sonaba, `ended` si estaba activa). Los webhooks de salas `call-` no tocan la presencia
+  de los canales.
+- **Chat caído:** iniciar y aceptar dan 503 y no se crea nada; rechazar y cortar siguen andando con la
+  identidad guardada en la llamada (el aviso de fin se pierde y se loguea).
+
 ---
 
 ## 6. Datos
@@ -465,7 +520,7 @@ cuando vuelve a pasar por `/join` (que chequea `can-connect`).
 | Amistades, solicitudes de amistad y bloqueos | `auth_db` (RDS) | `friendships`, `friend_requests`, `user_blocks`, siempre con el id canónico |
 | Avatares | S3 `discordia-g12-media/avatars/` | Los sube Auth; la URL queda en `auth_db` (`user_profiles.avatar_url`) |
 | Íconos de servidor | S3 `discordia-g12-media/server-icons/` | Los sube Server-Roles; la URL queda en `server_roles_db` (`servers.icon_url`) |
-| Sesiones de voz, presencia | `voice-redis` (realtime) | Local al nodo |
+| Sesiones de voz, presencia, llamadas privadas | `voice-redis` (realtime) | Local al nodo. Llamadas: `call:<id>`, `call:user:<id>` (ocupado) y `call:identity:<id>`, con TTL (45 s sonando, 12 h activa) |
 | Pub/sub del chat, inbox de DMs y presencia | `chat-redis` (realtime) | `noeviction` |
 | Rate limiting y cuentas suspendidas | `gateway-redis` (edge) | `volatile-lru`: las suspensiones las escribe Auth y las lee Kong; la clave por email no tiene TTL y nunca se descarta ([ADR-002 de Auth-User](../Auth-User-Service/docs/ADR-002-Suspension-Usuarios.md)) |
 | Eventos | RabbitMQ (infra) | Volumen persistente `rabbitmq-data` |
@@ -554,11 +609,15 @@ Mecanismos:
 - **Voice → Server-Roles**: timeout de 2 s y 3 intentos; si no responde, el join da 503 (ADR-03 de Voice).
 - **Chat → Auth**: los DMs **fallan cerrados**: si Auth no responde, 503 y no se entrega nada. Los canales no
   dependen de Auth y siguen funcionando.
+- **Voice → Chat** (llamadas privadas): timeout de 2 s y 3 intentos en las lecturas. Sin Chat no se puede
+  iniciar ni aceptar una llamada (503); cortar sigue andando. Chat no entra en el `/readyz` de Voice: los
+  canales de voz no dependen de Chat (ADR-04 de Voice).
 - **`restart: unless-stopped`** y healthchecks en todos los contenedores.
 
 **Dependencias síncronas que quedan**: Chat y Voice consultan a Server-Roles (edge) al abrir un WebSocket o
-unirse a voz, y Chat consulta a Auth (edge) en cada DM. Si edge cae, ya no importa (tampoco hay API). La de
-Server-Roles se puede eliminar con la "foto de permisos por eventos" (pendiente, P1 en `DEUDA-TECNICA.md`).
+unirse a voz, Chat consulta a Auth (edge) en cada DM, y Voice consulta a Chat (mismo nodo) en cada llamada
+privada. Si edge cae, ya no importa (tampoco hay API). La de Server-Roles se puede eliminar con la "foto de
+permisos por eventos" (pendiente, P1 en `DEUDA-TECNICA.md`).
 
 ---
 
@@ -839,6 +898,10 @@ Entrar a un nodo: `aws ssm start-session --target <id>` (`terraform output ssm_c
 - **El puerto 8001 necesita `terraform apply` antes del deploy.** El CD no aplica Terraform: si el compose con
   `AUTH_SERVICE_URL` llega a realtime sin la regla en el Security Group, los DMs fallan cerrados (503). Los
   canales no se enteran.
+- **Llamadas privadas: Chat antes que Voice.** Voice nuevo con Chat viejo (sin
+  `/internal/conversations/{id}/call-access`) no puede iniciar llamadas: Chat responde 404 sin `code` a la ruta
+  que no conoce y Voice lo toma como Chat no disponible (`503 CHAT_UNAVAILABLE`). No se crea nada y el resto de
+  la voz no se entera. `CHAT_SERVICE_URL` no necesita Terraform: Voice y Chat están en el mismo nodo.
 
 ### Terraform
 
@@ -890,6 +953,7 @@ curl -i localhost:8000/livez
 | Una VPC con un Security Group por nodo | Una VPC por nodo + peering | Los tres nodos están en la misma cuenta, así que las VPCs separadas solo sumaban peerings y rutas. El aislamiento entre nodos lo dan los Security Groups igual |
 | RDS movido a la VPC de los nodos | Dejarlo en su VPC + peering | Sin peering ni rutas; la base queda en subnets sin salida a internet y solo la ven los tres nodos |
 | Cambios de configuración del servidor por el inbox de cada miembro (`server.updated` → Chat → `SERVER_UPDATED`) | Avisar por el WebSocket de canal; polling de la lista de servidores | El socket de canal no le llega a quien está en otro servidor, y la barra muestra todos. El evento lleva solo el id y el cliente vuelve a pedir (ADR 0013) |
+| Llamadas privadas: sala de LiveKit 1 a 1 en Voice, autorización delegada a Chat y aviso por el inbox | WebRTC P2P; Voice consultando a Auth (lo que sugería ADR 0011); avisar por `/ws/voice` o por RabbitMQ | La regla "¿puede contactarlo?" ya está en Chat, en el mismo nodo; el inbox ya está abierto en todos los dispositivos; al iniciar hay que saber que el aviso salió (ADR 0015) |
 | S3 para avatares e íconos, subida a través del servicio | Cloudinary; presigned POST; rol IAM de la EC2 | Un solo proveedor (AWS, mismos créditos y budget); el servicio valida y normaliza la imagen; un usuario IAM por servicio lo deja desplegable en cualquier nodo (ADR-003) |
 | Cloudflare Pages | Vercel | Vercel desaconseja un proxy adelante; Pages convive con la nube naranja |
 | Cloudflare proxy en `api` | DNS directo / Vercel rewrites | Oculta la IP, TLS gratis, anti-DDoS. Vercel no soporta WebSockets hacia afuera |
