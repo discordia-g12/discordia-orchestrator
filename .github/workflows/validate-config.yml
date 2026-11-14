@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4 # sin submódulos: observability es privado y el compose no los necesita para validar
+      - uses: actions/checkout@v7 # sin submódulos: observability es privado y el compose no los necesita para validar
 
       - name: Compose
         run: |
