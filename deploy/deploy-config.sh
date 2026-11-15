@@ -114,7 +114,11 @@ main() {
   flock -w 300 9 || fail "hay otro deploy en curso en este nodo"
 
   [ "$(g branch --show-current)" = main ] || fail "$REPO no está en main"
-  [ -z "$(g status --porcelain --untracked-files=no)" ] || fail "$REPO tiene cambios locales: revisar a mano"
+  # Sin mirar el submódulo: deploy-service.sh hace "git pull" sin "submodule update" (no le toca reiniciar
+  # Grafana ni Prometheus), así que si el pull trae otro puntero de observability, el submódulo queda atrás y
+  # git lo marca como modificado. No son cambios locales: checkout() lo lleva al commit correcto más abajo.
+  [ -z "$(g status --porcelain --untracked-files=no --ignore-submodules=all)" ] \
+    || fail "$REPO tiene cambios locales: revisar a mano"
   g fetch --quiet origin main
   g merge-base --is-ancestor "$SHA" origin/main || fail "$SHA no está en main"
 
