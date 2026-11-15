@@ -77,6 +77,13 @@ docker compose -f deploy/docker-compose.yml up -d --build
 La API queda en `http://localhost:8000` (y con TLS autofirmado en `https://localhost:8443`). No
 levantar al mismo tiempo el compose de la raíz: usan los mismos puertos (también el 5432).
 
+**App mobile en un teléfono:** el 8000 se publica solo en `127.0.0.1`, así que el teléfono no le llega
+(`Could not connect to the server`) y el 8443 no sirve porque iOS y Android rechazan el certificado
+autofirmado. Con `GATEWAY_HTTP_BIND=0.0.0.0` en `deploy/.env` el 8000 queda en la red local y la app le
+pega a la IP de esta máquina (la misma de Metro). Hay que recrear el Gateway
+(`docker compose -f deploy/docker-compose.yml up -d gateway`) y tener el teléfono en la misma red. Solo en
+redes de confianza: es la API sin TLS.
+
 **Probar que un nodo no tumba a los otros** (nombres de servicio: ver la tabla):
 
 ```bash
@@ -132,7 +139,15 @@ regla edge:8001, Chat no llega a Auth y los DMs fallan cerrados (503), aunque lo
 4. Los paquetes de GHCR son privados: `docker login ghcr.io` como root, con un token de GitHub de solo
    lectura (`read:packages`).
 5. Solo edge: `deploy/gateway.env` (de `gateway.env.example`) y el Origin Certificate de Cloudflare en
-   `deploy/tls/` (`origin.pem`, `origin.key`).
+   `deploy/tls/` (`origin.pem`, `origin.key`). Kong corre como el usuario `kong` de la imagen, no como root,
+   así que `origin.key` lo tiene que poder leer ese UID. Cambió con Kong 3.9: la imagen pasó a Ubuntu 24.04,
+   que ya trae un usuario `ubuntu` con UID 1000. Con permiso para los dos, también anda un rollback a una
+   imagen anterior (ver el UID con `docker run --rm --entrypoint id ghcr.io/discordia-g12/gateway:<sha>`):
+   ```bash
+   sudo setfacl -m u:1000:r,u:1001:r /opt/discordia/deploy/tls/origin.key
+   ```
+   Sin esto, Kong no arranca (`cannot load certificate key ... Permission denied`) y el deploy vuelve al tag
+   anterior.
 6. Levantar en orden (infra → realtime → edge). En el servidor no se construye nada: se bajan las imágenes
    que publicó el CI de cada repo en GHCR:
    ```bash
