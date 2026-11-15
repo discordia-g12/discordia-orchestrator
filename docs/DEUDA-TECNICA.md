@@ -10,8 +10,8 @@ Al cerrar un ítem, borrarlo de acá (y mencionarlo en el PR).
 | Prioridad | Ítems | Por qué |
 |-----------|-------|---------|
 | **Alta** | R2 | Una dependencia sin fijar ya tiró un servicio |
-| **Media** | C1, V2, D1, D2, L1, L2, I1 | Permisos que no se actualizan en vivo, usuario maestro compartido, TLS sin validar, archivos de ejemplo desactualizados, estado de Terraform en una sola máquina |
-| **Baja** | R1, P1, P2, V3, V4, C3, C4, I2 | Payments todavía no tiene funcionalidad, mejoras de diseño, limpieza después del deploy, o solo hacen falta si el sistema crece |
+| **Media** | C1, V2, D1, D2, L1, L2, I1, M1, M6, V9 | Permisos que no se actualizan en vivo, usuario maestro compartido, TLS sin validar, archivos de ejemplo desactualizados, estado de Terraform en una sola máquina, puertos internos sin autenticación, identidad partida por alias |
+| **Baja** | R1, P1, P2, V3, V4, V5, V6, V7, V8, C3, C4, I2, M2, M3, M4, M5, M7 | Payments todavía no tiene funcionalidad, mejoras de diseño, limpieza después del deploy, o solo hacen falta si el sistema crece |
 
 ---
 
@@ -61,6 +61,20 @@ Verificación: el CI de cada repo en verde y levantar `deploy/docker-compose.yml
 | C3 | Más de una instancia del chat | Hoy hay una sola. Si se agregan más hacen falta dos cosas: una cola por instancia (`RABBITMQ_QUEUE` distinto, idealmente `exclusive`/`auto-delete` con el nombre del contenedor) porque `chat_engine_events` es compartida y cada evento le llega a una sola instancia, y el pub/sub de Redis para repartir los mensajes, porque hoy el broadcast es solo a los sockets de la misma instancia (`SessionManager` en memoria; el cliente Redis ya está creado pero no se usa para eso). |
 | C4 | Límite del historial | `limit` viene de la query sin tope (`?limit=1000000` le pide todo el canal a Atlas M0) y `getMissedMessages` no tiene límite. Poner un máximo (ej. 100) y validar `before` / `last_message_id_seen` como ObjectId. |
 
+## Mensajes directos (Auth, Chat, Server-Roles y clientes)
+
+Contexto: [ADR 0011](../org-docs/docs/architecture/decisions/0011-mensajes-directos.md).
+
+| # | Qué falta | Detalle |
+|---|-----------|---------|
+| M1 | **Rate limit de solicitudes de amistad** | `POST /users/me/friend-requests` solo tiene el límite general de Kong: se puede usar para mandar solicitudes en masa. Agregar un límite por usuario en Kong o en Auth. También `/internal` de Auth y de Server-Roles: no tienen autenticación, los protege solo el Security Group, y el 8001 y el 8002 exponen toda la API, que confía en `X-User-Id`. Ver P1. |
+| M2 | Solicitudes en tiempo real | Las solicitudes de amistad se piden cada 30 s y al volver a la app. Quien recibe una puede tardar hasta 30 s en verla, y lo mismo vale para un chat al que no se podía escribir: a quien desbloquean, el composer le vuelve con ese polling. Publicar el cambio por `inbox:<usuario>`, para lo que Auth tendría que avisarle a Chat. |
+| M3 | Push a mobile | Con la app cerrada no llega nada: el mensaje se ve al volver. Hace falta guardar tokens de dispositivo y un sender (Expo Push o APNs + FCM), probablemente en Notification. |
+| M4 | `202` vs `201` deja inferir un bloqueo | Una solicitud a quien te bloqueó responde `202` y no aparece en `outgoing`; a alguien que no bloqueó, por username, `201`. En la interfaz se ven igual, pero a nivel API se puede deducir. Para taparlo, Auth tendría que guardar una solicitud "fantasma" que solo vea quien la mandó. |
+| M5 | Adjuntos en el primer mensaje | `POST /channels/:id/attachments` exige un id `dm-…`, que no existe antes del primer mensaje, y los clientes no ofrecen adjuntar en un chat nuevo. `POST /conversations` ya acepta `attachments`: falta dónde subirlos antes de tener conversación (por ejemplo, un prefijo por usuario). |
+| M6 | Servidores en común y baneos con alias | Core guarda el `sub` crudo en `server_members`, `server_bans` y `servers.owner_id`, y nadie usa `/users/resolve-identity`. Con login federado, una misma persona puede tener membresías bajo dos ids: `GET /servers/mutual` da falsos negativos (nunca filtra de más) y un baneo bajo un id no alcanza al otro. Los clientes piden servidores en común con el id con el que se abrió el perfil, para que un alias no los pierda. Resolverlo en Kong o migrar Core al id canónico. |
+| M7 | Tests de `tests/test_deps.py` en Auth | 12 de 13 fallan con `AttributeError`: llaman a `get_authenticated_identity` directo, sin `x_user_role`, y reciben el `Header(...)` por defecto en lugar de un string. Vienen de la suspensión de usuarios, no de los DMs. Es el test el que hay que corregir: el rol llega bien por HTTP. |
+
 ## Voz (Voice-Signaling-Session-Service)
 
 | # | Qué falta | Detalle |
@@ -68,6 +82,17 @@ Verificación: el CI de cada repo en verde y levantar `deploy/docker-compose.yml
 | V2 | El mute no aplica a la voz | `can-connect` no mira `ServerMute` ni `SPEAK`, y el token siempre lleva `canPublish: true`. Un muteado, o alguien sin `SPEAK`, puede hablar. Devolver los permisos en la respuesta de `can-connect` y usar `canPublish` según `SPEAK` y mute. El consumidor de eventos de Voice ya existe (`modules/voice/events.ts`): sumar los bindings `member.muted` / `member.unmuted` y cambiar el permiso en vivo con `roomService.updateParticipant`. |
 | V3 | Llamadas abiertas antes del deploy del consumidor | Voice guarda de qué servidor es cada llamada recién desde `/join` con la versión nueva (`user:{id}:voice_server`). A quien ya estaba en una llamada al desplegar, un ban no lo saca hasta que vuelva a entrar. Se resuelve solo en cuanto todos vuelven a unirse; no hace falta migrar nada. |
 | V4 | Evento que falla al aplicarse | Si Redis o LiveKit fallan mientras se procesa un ban, el evento se descarta (no se reencola para no entrar en loop). El bloqueo suele quedar guardado igual (es lo primero que se escribe), pero el usuario sigue en la llamada actual. Si pasa seguido, reencolar con un límite de reintentos (header `x-death` con una dead-letter queue). |
+
+Llamadas privadas (#50): contexto en [ADR 0015](../org-docs/docs/architecture/decisions/0015-llamadas-privadas.md)
+y en el ADR-04 de Voice-Signaling-Session-Service.
+
+| # | Qué falta | Detalle |
+|---|-----------|---------|
+| V5 | Timer del timbre en memoria | El `setTimeout` de 30 s vive en la instancia que atendió el inicio. Si Voice se reinicia mientras suena (un deploy), nadie publica `CALL_ENDED` con `missed`: el TTL de 45 s de `call:<id>` libera el ocupado y el cliente da la llamada por perdida a los `expiresAt + 10 s`. Con más de una instancia de Voice pasa lo mismo. Para escalar, un barrido periódico de llamadas vencidas con el mismo compare-and-set (y mover también la presencia, ADR-02 de Voice). |
+| V6 | Un bloqueo no corta una llamada activa | `call-access` se consulta al iniciar y al aceptar. Si uno bloquea al otro durante la llamada, sigue hasta que alguien corte. Para cortarla, Auth tendría que avisar el bloqueo (hoy no publica eventos de relaciones, ver M2) y Voice terminarla con `unavailable`. |
+| V7 | Sin aviso con la app cerrada | La llamada suena solo si el inbox está conectado. Es el mismo push que falta para los DM (M3), con un requisito más: en mobile, una llamada entrante necesita notificación de alta prioridad (CallKit / ConnectionService) para sonar con el teléfono bloqueado. |
+| V8 | La llamada no queda en el chat | Ni "llamada perdida" ni la duración aparecen en la conversación: quien no estaba conectado no se entera de que lo llamaron. Voice podría pedirle a Chat que guarde un mensaje de sistema al terminar (otro endpoint interno), con cuidado de no contarlo como no leído de quien llamó. |
+| V9 | `POST /internal/inbox/events` de Chat protegido solo por red | Quien llegue al 3000 de realtime sin pasar por Kong puede publicar un `CALL_*` en el inbox de cualquiera (por Kong responde 404). Mismo caso que el resto de `/internal` (M1, P1): un secreto compartido entre servicios o mTLS lo cerraría para todos. |
 
 ## Permisos entre servicios
 
@@ -112,7 +137,7 @@ Contexto: ADR-O1 a ADR-O4 en `observability/docs/` y §10 de `ARQUITECTURA.md`.
 |---|-----------|---------|
 | O1 | `/metrics` propio en cada servicio | El nivel 2 (comportamiento) solo tiene el RED del gateway (plugin `prometheus` de Kong) y RabbitMQ. Ningún servicio expone `/metrics`: no hay latencia interna, ni estado del outbox, ni dependencias de `/readyz` (`discordia_dependency_up`), ni runtime de Node (`nodejs_*`). Sumar `prom-client` (Chat, Voice, Notification) y `prometheus-fastapi-instrumentator` o `prometheus_client` (Auth, Server-Roles, Payments) con las convenciones de `observability/docs/observability-conventions.md` (rutas como plantilla, sin IDs en labels). Para scrapearlos desde infra: un puerto por servicio y su regla de Security Group, o pasar a Alloy por nodo (ADR-O3). |
 | O2 | Las alertas no avisan a nadie | Las reglas evalúan en Prometheus y se ven en *Alerts* y en el Overview, pero no hay Alertmanager ni canal (ADR-O4). Si se agranda infra (I2) o se pasa a un nodo de monitoreo (ADR-O1), sumar Alertmanager con un receptor (Discord/Slack/mail) y la alarma `Watchdog`. Mientras tanto, mirar el Overview después de cada deploy. |
-| O3 | Incidentes y métricas de negocio | Notification solo arma el estado de la plataforma (sondeo de `/readyz`). Faltan los incidentes de la historia 74 (CA1/CA2: staff publica y resuelve; necesita migraciones y tabla) y las métricas de negocio 70–73 (consumidor de eventos de RabbitMQ y tablas agregadas por día, ADR-O2). Las rutas `/api/v1/audit` y `/api/v1/metrics` de Kong todavía dan 404. |
+| O3 | Métricas de negocio | Notification arma el estado de la plataforma y los incidentes (historia 74, con migraciones y `audit_logs`, ADR-03 del servicio). Faltan las métricas de negocio 70–73 (consumidor de eventos de RabbitMQ y tablas agregadas por día, ADR-O2). Las rutas `/api/v1/audit` y `/api/v1/metrics` de Kong todavía dan 404. |
 
 ---
 

@@ -87,8 +87,10 @@ services:
     profiles: ["edge"]
     image: redis:7-alpine
     restart: unless-stopped
-    # Contadores de rate limit: si se llena, perder los más viejos es aceptable.
-    command: ["redis-server", "--maxmemory", "40mb", "--maxmemory-policy", "allkeys-lru"]
+    # Contadores de rate limit y cuentas suspendidas (las escribe auth-service, las lee Kong). volatile-lru: si
+    # se llena descarta solo claves con TTL (contadores); la de cada email suspendido no tiene TTL y nunca se
+    # pierde (ADR-002 de Auth-User-Service).
+    command: ["redis-server", "--maxmemory", "40mb", "--maxmemory-policy", "volatile-lru"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -110,6 +112,10 @@ services:
     image: ${REGISTRY:-discordia}/auth-service:${AUTH_SERVICE_TAG:-local}
     build: ../Auth-User-Service
     restart: unless-stopped
+    ports:
+      # Chat (nodo realtime) consulta /internal/users/{id}/canonical y /internal/relations: inbox y DMs.
+      # En producción el Security Group solo lo abre al grupo realtime (ADR 0011)
+      - "8001:8000"
     environment: &auth-env
       ENVIRONMENT: ${ENVIRONMENT:-production}
       # RDS (local: el Postgres de desarrollo del profile local, por host.docker.internal:5432)
@@ -121,6 +127,13 @@ services:
       AUTH0_DOMAIN: ${AUTH0_DOMAIN:-dev-dppme5iaqg60gkmo.us.auth0.com}
       AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-f2H8PhlKDl3KSIm64G5mHAeQih7iFyIP}
       AUTH0_DB_CONNECTION: Username-Password-Authentication
+      # Suspensión de usuarios (backoffice): aplicación Machine to Machine de Auth0 (read:users, update:users).
+      # Sin ella, suspender responde 503. La lista de suspendidos va al Redis del Gateway, en este mismo nodo
+      AUTH0_MGMT_CLIENT_ID: ${AUTH0_MGMT_CLIENT_ID:-}
+      AUTH0_MGMT_CLIENT_SECRET: ${AUTH0_MGMT_CLIENT_SECRET:-}
+      GATEWAY_REDIS_HOST: gateway-redis
+      GATEWAY_REDIS_PORT: "6379"
+      SUSPENSION_DENYLIST_TTL_SECONDS: ${SUSPENSION_DENYLIST_TTL_SECONDS:-86400}
       # Imágenes en S3 con el usuario IAM propio del servicio (no usa el rol de la EC2: anda en cualquier nodo)
       AWS_REGION: ${AWS_REGION:-us-east-1}
       S3_BUCKET: ${S3_BUCKET:-}
@@ -261,6 +274,8 @@ services:
       # can-send contra Server-Roles (nodo edge) al abrir cada WebSocket; después la sesión se
       # actualiza con los eventos member.* que llegan por RabbitMQ (nodo infra)
       - CORE_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8002
+      # Id canónico y relaciones contra Auth (nodo edge): sin esto el inbox y los DMs responden 503
+      - AUTH_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8001
       - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@${INFRA_HOST:-host.docker.internal}:5672/
       - RABBITMQ_EXCHANGE=server.events
       - NODE_OPTIONS=--max-old-space-size=192
@@ -343,6 +358,9 @@ services:
       # Señalización por Kong. Producción: wss://api.discordia.lol/livekit
       - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL:-ws://localhost:8000/livekit}
       - CORE_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8002
+      # Llamadas privadas: call-access, id canónico y aviso por el inbox contra /internal/* de Chat (mismo
+      # nodo, por nombre). Sin Chat, iniciar o aceptar una llamada responde 503; cortar sigue andando (ADR-04)
+      - CHAT_SERVICE_URL=http://chat-engine-service:3000
       # Eventos member.banned / kicked / left (nodo infra): saca al usuario de la llamada
       - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@${INFRA_HOST:-host.docker.internal}:5672/
       - RABBITMQ_EXCHANGE=server.events
@@ -413,6 +431,7 @@ services:
 
   notification-service:
     profiles: ["realtime"]
+    <<: *cross-node
     image: ${REGISTRY:-discordia}/notification-service:${NOTIFICATION_TAG:-local}
     build: ../Notification-Audit-Metrics-Service
     restart: unless-stopped
@@ -431,6 +450,11 @@ services:
       # una caída falsa mientras falten la regla de SG o el Gateway con /internal/readyz). Ver .env.example.
       - STATUS_GATEWAY_URL=${STATUS_GATEWAY_URL:-}
       - STATUS_TLS_INSECURE=true
+      # Métricas globales del backoffice (/api/v1/admin/metrics): pide los conteos a /internal/metrics/* de
+      # Chat (mismo nodo, por nombre) y de Server-Roles (nodo edge, por IP). Si alguno no responde, el dato
+      # sale en null con partial: true (ADR-05 de Notification).
+      - CHAT_ENGINE_URL=http://chat-engine-service:3000
+      - CORE_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8002
     depends_on:
       local-postgres:
         condition: service_healthy

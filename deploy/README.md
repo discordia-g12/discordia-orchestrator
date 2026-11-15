@@ -4,7 +4,7 @@ Un solo compose (`deploy/docker-compose.yml`) para los tres nodos, igual en loca
 
 | Nodo (profile) | Red | Servicios | Puertos publicados (para los otros nodos) |
 |---|---|---|---|
-| `edge` | `edge` | Kong + Redis, Auth (+worker), Server-Roles (+worker) | 443/8443 (Kong), 8002 (Server-Roles internal), 8100 (métricas de Kong, solo para infra) |
+| `edge` | `edge` | Kong + Redis, Auth (+worker), Server-Roles (+worker) | 443/8443 (Kong), 8001 (Auth internal, para Chat), 8002 (Server-Roles internal), 8100 (métricas de Kong, solo para infra) |
 | `realtime` | `realtime` | Chat + Redis, Voice + Redis, LiveKit, Notification | 3000, 8082, 3001, 7880, 7881, 7882/udp |
 | `infra` | `infra` | RabbitMQ, Payments, Prometheus, Grafana | 5672, 8003 |
 | los tres | (default) | Node Exporter, cAdvisor (métricas de la máquina y de sus contenedores) | 9100, 9180 (solo para infra) |
@@ -42,6 +42,19 @@ En producción, orden de puesta en marcha:
 3. Recién entonces, `STATUS_GATEWAY_URL=https://10.0.1.10:443` en el `nodes.env` de realtime.
 
 Si se agrega antes, el estado público muestra una caída falsa.
+
+**Métricas globales:** Notification arma `/api/v1/admin/metrics` (solo staff) pidiendo los conteos a
+`/internal/metrics/*` de Chat (`CHAT_ENGINE_URL`, mismo nodo) y de Server-Roles (`CORE_SERVICE_URL`, el 8002
+de edge). No hay variable nueva en `nodes.env`: salen de `EDGE_HOST`, y la regla edge 8002 desde realtime ya
+existe. Si uno de los dos no responde, el dato sale vacío y el resto se muestra igual.
+
+**Llamadas privadas:** Voice le pregunta a Chat si alguien puede llamar en una conversación y le pide que
+avise por el inbox (`/internal/conversations/{id}/call-access`, `/internal/users/{id}/canonical` y
+`/internal/inbox/events`), por `CHAT_SERVICE_URL` (mismo nodo, por nombre). No hay variable nueva en
+`nodes.env` ni regla de Security Group: Voice y Chat están en realtime. Sin Chat, iniciar o aceptar una
+llamada responde 503 y cortarla sigue andando. Va a `main` antes que los servicios: Voice nuevo sin la
+variable cae al mismo default (`http://chat-engine-service:3000`), pero así queda explícito
+([ADR 0015](../org-docs/docs/architecture/decisions/0015-llamadas-privadas.md)).
 
 **Cada nodo tiene su propia red de Docker.** Los contenedores de un nodo se ven por nombre entre ellos,
 pero no ven los de otro nodo: lo que cruza de un nodo a otro va a la IP del host y al puerto publicado,
@@ -101,6 +114,9 @@ y el job de GitHub falla. Cada deploy queda en `/var/log/discordia-deploy.log` d
 
 Los dos corren como root, toman el mismo lock (un deploy por vez en cada nodo) y aceptan solo el SHA
 completo (40 caracteres).
+
+El CD no aplica Terraform. Un puerto nuevo entre nodos necesita `terraform apply` antes del deploy: sin la
+regla edge:8001, Chat no llega a Auth y los DMs fallan cerrados (503), aunque los canales sigan andando.
 
 ### Preparar un nodo nuevo (una sola vez)
 
