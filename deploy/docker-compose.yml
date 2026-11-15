@@ -38,7 +38,9 @@ services:
     restart: unless-stopped
     ports:
       - "${GATEWAY_HTTPS_PORT:-8443}:8443"           # Producción: 443, solo desde Cloudflare (Security Group)
-      - "127.0.0.1:${GATEWAY_HTTP_PORT:-8000}:8000"  # HTTP sin TLS: local / depuración en el host
+      # HTTP sin TLS: local / depuración. Solo el host salvo GATEWAY_HTTP_BIND=0.0.0.0 (la app mobile en un
+      # teléfono de la misma red). En producción nunca: ahí todo entra por el 8443 desde Cloudflare
+      - "${GATEWAY_HTTP_BIND:-127.0.0.1}:${GATEWAY_HTTP_PORT:-8000}:8000"
       # Métricas (Status API) para Prometheus. En local, solo el host; en edge KONG_STATUS_BIND=0.0.0.0 y el SG
       # solo lo abre a infra
       - "${KONG_STATUS_BIND:-127.0.0.1}:8100:8100"
