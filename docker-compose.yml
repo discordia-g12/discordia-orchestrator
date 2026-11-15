@@ -546,6 +546,10 @@ services:
     environment:
       - PORT=3000
       - DATABASE_URL=postgresql://${RDS_USER}:${RDS_PASSWORD}@${RDS_HOST}:${RDS_PORT:-5432}/notification_db
+      - CHAT_ENGINE_URL=http://chat-engine-service:3000
+      - CORE_SERVICE_URL=http://server-roles-service:8080
+      - SERVER_ROLES_URL=http://server-roles-service:8080
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@rabbitmq:5672/
       - NODE_OPTIONS=--max-old-space-size=96
     depends_on:
       postgres:
