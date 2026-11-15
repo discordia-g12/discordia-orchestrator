@@ -455,6 +455,10 @@ services:
       # sale en null con partial: true (ADR-05 de Notification).
       - CHAT_ENGINE_URL=http://chat-engine-service:3000
       - CORE_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8002
+      # Eventos de moderación para auditoría (nodo infra) y permisos contra Core (nodo edge)
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@${INFRA_HOST:-host.docker.internal}:5672/
+      - RABBITMQ_EXCHANGE=server.events
+      - SERVER_ROLES_URL=http://${EDGE_HOST:-host.docker.internal}:8002
     depends_on:
       local-postgres:
         condition: service_healthy
