@@ -694,11 +694,14 @@ flowchart LR
 ```
 
 - **CI por repo** (`.github/workflows/ci.yml`), tres jobs encadenados con `needs`:
-  - `test` (`test-and-build` en Voice): lint, tests y análisis estático;
-  - `docker`: en un PR solo construye la imagen; en push a `main` o `develop`, además la publica en GHCR;
+  - `test`: lint, tests y análisis estático;
+  - `docker`: en push a `main` o `develop`, construye la imagen y la publica en GHCR. En los PRs no corre
+    (salvo los de Dependabot que cambian la imagen base, donde solo la construye), para ahorrar minutos de
+    Actions; en Gateway sí corre en los PRs, porque valida `kong.yml` con Kong, pero sin el segundo build;
   - `deploy`: solo en push a `main`, llama al workflow reutilizable del orquestador.
 
-  Si los tests fallan, no hay imagen, y sin imagen no hay deploy.
+  Si los tests fallan, no hay imagen, y sin imagen no hay deploy. Un push nuevo a un PR cancela el run
+  anterior del mismo PR (`concurrency`); los push a `main`/`develop` nunca se cancelan.
 - Etiquetas de la imagen: **SHA completo del commit** (40 caracteres: lo que se despliega, no cambia) y nombre
   de la rama. Sin `latest`.
 - La SPA no usa imagen: Cloudflare Pages publica la web desde `main` de Discordia-WebApp.

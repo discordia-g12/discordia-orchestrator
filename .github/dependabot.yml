@@ -1,16 +1,18 @@
 # Actualizaciones de dependencias con un PR a develop, que pasa por el CI como cualquier cambio.
-# Semanal, con las minor y patch de cada ecosistema juntas en un solo PR. Las major llegan de a una,
-# porque pueden romper y hay que revisarlas.
+# Mensual y con pocos PRs abiertos a la vez, para no gastar los minutos de Actions: cada PR (y cada rebase)
+# corre el CI completo.
 version: 2
 updates:
   # Las imágenes de deploy/docker-compose.yml se actualizan a mano: cambiar RabbitMQ o Kong de versión mayor requiere pasos previos
+  # Todas las versiones en un solo PR, también las major: cambiar de versión una action rara vez rompe algo
   - package-ecosystem: github-actions
     directory: /
     target-branch: develop
     schedule:
-      interval: weekly
+      interval: monthly
+    open-pull-requests-limit: 2
     commit-message:
       prefix: "chore(deps)"
     groups:
-      minor-and-patch:
-        update-types: [minor, patch]
+      github-actions:
+        patterns: ["*"]
