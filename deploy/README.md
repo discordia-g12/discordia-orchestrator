@@ -120,7 +120,9 @@ y el job de GitHub falla. Cada deploy queda en `/var/log/discordia-deploy.log` d
 | `deploy-config.sh` | `deploy-config.sh <sha>` | Lleva `/opt/discordia` a ese commit de `main`, corre `up -d` del nodo y recrea los contenedores cuyos archivos montados cambiaron. Rollback al commit anterior si el nodo no queda sano en 180 s (los servicios con `discordia.deploy.optional=true` solo generan un aviso) |
 
 Los dos corren como root, toman el mismo lock (un deploy por vez en cada nodo) y aceptan solo el SHA
-completo (40 caracteres).
+completo (40 caracteres). El CD los llama por SSM con los documentos `discordia-deploy-service` y
+`discordia-deploy-config` (`infra/terraform/iam-cd.tf`): el rol `discordia-cd` no puede mandar ningún otro
+comando a los nodos. Si cambia el comando que corre un documento, va por `terraform apply`, no por el CD.
 
 El CD no aplica Terraform. Un puerto nuevo entre nodos necesita `terraform apply` antes del deploy: sin la
 regla edge:8001, Chat no llega a Auth y los DMs fallan cerrados (503), aunque los canales sigan andando.

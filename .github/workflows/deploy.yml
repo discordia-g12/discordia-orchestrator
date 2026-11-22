@@ -61,7 +61,7 @@ jobs:
           [[ "$SERVICE" =~ ^[a-z-]+$ ]] || { echo "::error::imagen inválida: $SERVICE"; exit 1; }
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::el SHA tiene que ser el commit completo: $SHA"; exit 1; }
 
-      - uses: aws-actions/configure-aws-credentials@v6
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ env.CD_ROLE_ARN }}
           role-session-name: deploy-${{ inputs.service }}-${{ github.run_id }}
@@ -82,14 +82,12 @@ jobs:
         env:
           INSTANCE_ID: ${{ steps.node.outputs.instance_id }}
         run: |
-          # El pull primero: así corre la versión del script que está en main (y existe en el primer deploy).
-          # Si falla, sigue con lo que hay en el nodo, igual que el script.
-          cmd="export HOME=/root; git -c safe.directory=/opt/discordia -C /opt/discordia pull --ff-only --quiet || echo 'aviso: git pull falló'; /opt/discordia/deploy/deploy-service.sh $SERVICE $SHA"
+          # Documento propio (infra/terraform/iam-cd.tf): el rol no puede mandar otro comando a los nodos
           id=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
-            --document-name AWS-RunShellScript \
+            --document-name discordia-deploy-service \
             --comment "deploy $SERVICE ${SHA:0:7} (${GITHUB_REPOSITORY#*/} run $GITHUB_RUN_ID)" \
-            --parameters "$(jq -n --arg c "$cmd" '{commands: [$c], executionTimeout: ["900"]}')" \
+            --parameters "$(jq -n --arg s "$SERVICE" --arg h "$SHA" '{service: [$s], sha: [$h]}')" \
             --query Command.CommandId --output text)
           echo "command_id=$id" >> "$GITHUB_OUTPUT"
           echo "SSM command: $id"
