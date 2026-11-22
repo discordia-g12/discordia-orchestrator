@@ -37,8 +37,70 @@ resource "aws_iam_role" "cd" {
   })
 }
 
-# Permisos mínimos: mandar AWS-RunShellScript a los tres nodos, leer su resultado y buscar la instancia por tag.
-# GetCommandInvocation, ListCommandInvocations y DescribeInstances no admiten permisos por recurso.
+# Lo único que el rol puede correr en un nodo. Con AWS-RunShellScript, quien pudiera pushear a main de
+# cualquiera de los repos corría lo que quisiera como root (y leía nodes.env). SSM rechaza los parámetros
+# que no cumplen allowedPattern antes de llegar al nodo, así que {{ }} no puede inyectar comandos.
+# En el contenido no puede aparecer "$" seguido de "{" (Terraform lo interpola): se usa $f, $(...), etc.
+resource "aws_ssm_document" "deploy_service" {
+  name          = "discordia-deploy-service"
+  document_type = "Command"
+
+  content = jsonencode({
+    schemaVersion = "2.2"
+    description   = "Deploy de un servicio: deploy/deploy-service.sh <imagen> <sha>"
+    parameters = {
+      service = { type = "String", allowedPattern = "^[a-z-]+$" }
+      sha     = { type = "String", allowedPattern = "^[0-9a-f]{40}$" }
+    }
+    mainSteps = [{
+      action = "aws:runShellScript"
+      name   = "deployService"
+      inputs = {
+        timeoutSeconds = "900"
+        # El pull primero: así corre la versión del script que está en main. Si falla, sigue con la del nodo.
+        runCommand = [
+          "export HOME=/root",
+          "git -c safe.directory=/opt/discordia -C /opt/discordia pull --ff-only --quiet || echo 'aviso: git pull falló'",
+          "/opt/discordia/deploy/deploy-service.sh {{ service }} {{ sha }}",
+        ]
+      }
+    }]
+  })
+}
+
+resource "aws_ssm_document" "deploy_config" {
+  name          = "discordia-deploy-config"
+  document_type = "Command"
+
+  content = jsonencode({
+    schemaVersion = "2.2"
+    description   = "Deploy de la configuración del orquestador: deploy/deploy-config.sh <sha>"
+    parameters = {
+      sha = { type = "String", allowedPattern = "^[0-9a-f]{40}$" }
+    }
+    mainSteps = [{
+      action = "aws:runShellScript"
+      name   = "deployConfig"
+      inputs = {
+        timeoutSeconds = "900"
+        # El script tal como está en ese commit (el del nodo puede ser viejo o no existir), en un archivo
+        # temporal porque el script mueve el repo, y con él su propio archivo.
+        runCommand = [
+          "export HOME=/root",
+          "set -e",
+          "g='git -c safe.directory=/opt/discordia -C /opt/discordia'",
+          "$g fetch --quiet origin main",
+          "f=$(mktemp); trap 'rm -f $f' EXIT",
+          "$g show {{ sha }}:deploy/deploy-config.sh > $f",
+          "bash $f {{ sha }}",
+        ]
+      }
+    }]
+  })
+}
+
+# Permisos mínimos: correr esos dos documentos en los tres nodos, leer su resultado y buscar la instancia por
+# tag. GetCommandInvocation, ListCommandInvocations y DescribeInstances no admiten permisos por recurso.
 resource "aws_iam_role_policy" "cd" {
   name = "deploy-via-ssm"
   role = aws_iam_role.cd.id
@@ -51,7 +113,7 @@ resource "aws_iam_role_policy" "cd" {
         Effect = "Allow"
         Action = "ssm:SendCommand"
         Resource = concat(
-          ["arn:aws:ssm:${var.region}::document/AWS-RunShellScript"],
+          [aws_ssm_document.deploy_service.arn, aws_ssm_document.deploy_config.arn],
           [
             for id in [module.edge.instance_id, module.realtime.instance_id, module.infra.instance_id] :
             "arn:aws:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:instance/${id}"

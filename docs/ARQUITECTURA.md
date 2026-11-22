@@ -743,8 +743,9 @@ sequenceDiagram
    en el workflow: no es un secreto, y una variable de organización necesita permisos de admin de la org.
 3. Busca la instancia por su tag `Name=discordia-<nodo>`, sin IDs fijos en el código. Si no hay exactamente
    una corriendo, falla.
-4. Manda por SSM (`AWS-RunShellScript`) un `git pull` de `/opt/discordia`, para correr la versión del script
-   que está en `main`, y después `deploy-service.sh <imagen> <sha>`.
+4. Manda por SSM el documento `discordia-deploy-service` (definido en `infra/terraform/iam-cd.tf`), que hace
+   un `git pull` de `/opt/discordia`, para correr la versión del script que está en `main`, y después
+   `deploy-service.sh <imagen> <sha>`.
 5. Espera el resultado y muestra la salida del nodo en el log del job. No usa `aws ssm wait`, que se corta a
    los 100 s. Si el comando no termina en `Success`, el job falla.
 
@@ -816,7 +817,11 @@ Como el deploy ya no frena un Prometheus roto, la configuración se valida antes
   GitHub firma el `sub` en formato inmutable (`repo:discordia-g12@<id org>/<repo>@<id repo>:ref:refs/heads/main`):
   renombrar un repo no le da acceso a otro.
 - **Permisos mínimos:**
-  - `ssm:SendCommand`, solo sobre las tres instancias y el documento `AWS-RunShellScript`;
+  - `ssm:SendCommand`, solo sobre las tres instancias y los documentos `discordia-deploy-service` y
+    `discordia-deploy-config`. Cada uno corre un único script y solo acepta parámetros que cumplen su
+    `allowedPattern` (imagen `^[a-z-]+$`, SHA de 40 caracteres hex), así que un workflow que asume el rol
+    no puede correr otro comando en los nodos ni leer `nodes.env`. Como mucho puede desplegar una imagen
+    de GHCR o volver a aplicar la configuración de `main`;
   - `ssm:GetCommandInvocation`, `ssm:ListCommandInvocations` y `ec2:DescribeInstances` (no admiten
     permisos por recurso).
 - Las EC2 bajan las imágenes de GHCR con un `docker login` de solo lectura (`read:packages`) y hacen
