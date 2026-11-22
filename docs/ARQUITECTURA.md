@@ -744,8 +744,9 @@ sequenceDiagram
 3. Busca la instancia por su tag `Name=discordia-<nodo>`, sin IDs fijos en el código. Si no hay exactamente
    una corriendo, falla.
 4. Manda por SSM el documento `discordia-deploy-service` (definido en `infra/terraform/iam-cd.tf`), que hace
-   un `git pull` de `/opt/discordia`, para correr la versión del script que está en `main`, y después
-   `deploy-service.sh <imagen> <sha>`.
+   `git fetch` y corre `deploy-service.sh <imagen> <sha>` tal como está en `origin/main`, desde un archivo
+   temporal. No hace `git pull` antes del lock, porque chocaría con un deploy de configuración en curso: el
+   `pull` lo hace el script, ya con el lock tomado.
 5. Espera el resultado y muestra la salida del nodo en el log del job. No usa `aws ssm wait`, que se corta a
    los 100 s. Si el comando no termina en `Success`, el job falla.
 
@@ -805,8 +806,8 @@ El script (`deploy/deploy-config.sh`):
 Comparte el lock y el log con `deploy-service.sh` (en el log aparece como `image=config`).
 
 Como el deploy ya no frena un Prometheus roto, la configuración se valida antes:
-`.github/workflows/validate-config.yml` (PR y push a `develop`) corre `docker compose config` y
-`promtool check config` sobre la plantilla. Las reglas de alerta las valida el CI de `observability`
+`.github/workflows/validate-config.yml` (PR y push a `develop`) corre `docker compose config`,
+`shellcheck` sobre los scripts de deploy y `promtool check config` sobre la plantilla. Las reglas de alerta las valida el CI de `observability`
 (`promtool check rules` y `test rules`).
 
 ### Seguridad del deploy
@@ -850,7 +851,7 @@ Archivos:
 | `deploy/observability/prometheus.yml.tmpl` | Destinos de Prometheus y carga de las reglas de alerta |
 | `.github/workflows/deploy.yml` | Workflow reutilizable del deploy de servicios |
 | `.github/workflows/deploy-config.yml` | Deploy de la configuración |
-| `.github/workflows/validate-config.yml` | Valida el compose y la plantilla de Prometheus antes de `main` |
+| `.github/workflows/validate-config.yml` | Valida el compose, los scripts de deploy y la plantilla de Prometheus antes de `main` |
 | `init-dbs.sql` (raíz) | Solo local: crea las cuatro bases en `local-postgres` |
 | `infra/terraform/` | Infraestructura (ver abajo) |
 
