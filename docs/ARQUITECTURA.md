@@ -762,7 +762,9 @@ script en el nodo.
    `up -d --no-build --no-deps` solo con los contenedores de ese repo.
 5. Espera hasta 120 s (`HEALTH_TIMEOUT`) a que todos queden `healthy`. Si alguno no llega, muestra sus logs,
    vuelve al tag anterior, lo levanta de nuevo y sale con error.
-6. Registra el resultado en `/var/log/discordia-deploy.log`: `ok`, `rolled-back`, `rollback-failed` o
+6. Si quedó `healthy`, borra las imágenes que no usa ningún contenedor (`docker image prune -af`): si no, cada
+   deploy deja la anterior en el disco de 20 GB. Para volver a una versión vieja a mano, sigue en GHCR.
+7. Registra el resultado en `/var/log/discordia-deploy.log`: `ok`, `rolled-back`, `rollback-failed` o
    `pull-failed`.
 
 Los healthchecks de los servicios en el compose usan `/readyz`: un servicio que arranca pero no llega a su base o a RabbitMQ
