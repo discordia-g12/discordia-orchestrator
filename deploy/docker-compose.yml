@@ -625,7 +625,7 @@ services:
   # SOLO LOCAL: Postgres que hace de RDS (profile local)
   # En producción la base es el RDS (DB_HOST). Acá se publica en el 5432 del host y los servicios le
   # llegan por host.docker.internal:5432, igual que al RDS desde las EC2. Crea las cuatro bases con
-  # init-dbs.sql (el mismo del compose de la raíz).
+  # init-dbs.sql (en la raíz del repo).
   # ======================================================================
   local-postgres:
     profiles: ["local"]

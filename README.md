@@ -77,14 +77,6 @@ Bajar todo: `docker compose -f deploy/docker-compose.yml down` (con `-v` tambié
 Más detalle (nodos, redes, cómo probar que la caída de un nodo no tumba a los otros) en
 [`deploy/README.md`](deploy/README.md).
 
-### El `docker-compose.yml` de la raíz
-
-Es el compose anterior a la separación en nodos. Incluye la web (con recarga en caliente si se copia
-`docker-compose.override.yml.example` a `docker-compose.override.yml`), pero sus servicios se conectan a la
-base que diga `RDS_HOST`, que en `.env.example` es el RDS de producción. Para desarrollar, usar
-`deploy/docker-compose.yml`. Está registrado como deuda técnica (L1 en
-[`docs/DEUDA-TECNICA.md`](docs/DEUDA-TECNICA.md)).
-
 ## Producción y despliegue
 
 - **Infraestructura:** tres EC2 (edge, realtime e infra) en una VPC, un RDS, un bucket S3, el DNS y Cloudflare
@@ -103,7 +95,6 @@ infra/terraform/      infraestructura de AWS y Cloudflare
 livekit/              configuración del servidor de LiveKit
 rabbitmq/             configuración de RabbitMQ
 docs/                 arquitectura, bitácora del proyecto y deuda técnica
-docker-compose.yml    compose de desarrollo anterior (ver arriba)
 init-dbs.sql          crea las cuatro bases en el PostgreSQL local
 ```
 
