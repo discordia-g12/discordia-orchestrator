@@ -57,11 +57,16 @@ resource "aws_ssm_document" "deploy_service" {
       name   = "deployService"
       inputs = {
         timeoutSeconds = "900"
-        # El pull primero: así corre la versión del script que está en main. Si falla, sigue con la del nodo.
+        # Corre el script de main sin tocar el working tree: un "git pull" acá iría fuera del lock y podía
+        # chocar con el "reset --hard" de un deploy-config en curso. El pull lo hace el script, con el lock.
         runCommand = [
           "export HOME=/root",
-          "git -c safe.directory=/opt/discordia -C /opt/discordia pull --ff-only --quiet || echo 'aviso: git pull falló'",
-          "/opt/discordia/deploy/deploy-service.sh {{ service }} {{ sha }}",
+          "set -e",
+          "g='git -c safe.directory=/opt/discordia -C /opt/discordia'",
+          "$g fetch --quiet origin main || echo 'aviso: git fetch falló, uso la última copia de main'",
+          "f=$(mktemp); trap 'rm -f $f' EXIT",
+          "$g show origin/main:deploy/deploy-service.sh > $f",
+          "bash $f {{ service }} {{ sha }}",
         ]
       }
     }]

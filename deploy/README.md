@@ -74,8 +74,7 @@ cp deploy/.env.example deploy/.env   # COMPOSE_PROFILES=edge,realtime,infra,loca
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
-La API queda en `http://localhost:8000` (y con TLS autofirmado en `https://localhost:8443`). No
-levantar al mismo tiempo el compose de la raíz: usan los mismos puertos (también el 5432).
+La API queda en `http://localhost:8000` (y con TLS autofirmado en `https://localhost:8443`).
 
 **App mobile en un teléfono:** el 8000 se publica solo en `127.0.0.1`, así que el teléfono no le llega
 (`Could not connect to the server`) y el 8443 no sirve porque iOS y Android rechazan el certificado

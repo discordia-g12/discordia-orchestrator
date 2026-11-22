@@ -32,6 +32,11 @@ jobs:
           cp deploy/.env.example deploy/.env
           docker compose -f deploy/docker-compose.yml config -q
 
+      - name: Deploy scripts
+        # Corren como root en los nodos: un error tiene que aparecer acá, no en medio de un deploy o un rollback.
+        # warning y no info: los "A && B || fail" (SC2015) de los scripts son a propósito.
+        run: shellcheck --severity=warning deploy/*.sh
+
       - name: Prometheus template
         run: |
           # Mismo reemplazo que el entrypoint del servicio prometheus, con IPs de producción
