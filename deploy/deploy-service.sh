@@ -104,6 +104,8 @@ main() {
   if wait_healthy; then
     record ok
     log "listo: $IMAGE:$SHA healthy"
+    # Cada deploy deja la imagen anterior en un disco de 20 GB. Para volver a mano, sigue en GHCR.
+    docker image prune -af > /dev/null || log "aviso: no se pudieron borrar las imágenes viejas"
     return 0
   fi
 

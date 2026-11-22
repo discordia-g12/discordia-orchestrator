@@ -116,7 +116,7 @@ y el job de GitHub falla. Cada deploy queda en `/var/log/discordia-deploy.log` d
 
 | Script | Uso | Qué hace |
 |---|---|---|
-| `deploy-service.sh` | `deploy-service.sh <imagen> <sha>` | Baja la imagen, cambia `<SERVICIO>_TAG` en `nodes.env` y recrea solo los contenedores de ese repo (`--no-deps`). Rollback al tag anterior si no queda `healthy` en 120 s |
+| `deploy-service.sh` | `deploy-service.sh <imagen> <sha>` | Baja la imagen, cambia `<SERVICIO>_TAG` en `nodes.env` y recrea solo los contenedores de ese repo (`--no-deps`). Rollback al tag anterior si no queda `healthy` en 120 s. Si queda, borra las imágenes que no usa ningún contenedor (`docker image prune -af`) |
 | `deploy-config.sh` | `deploy-config.sh <sha>` | Lleva `/opt/discordia` a ese commit de `main`, corre `up -d` del nodo y recrea los contenedores cuyos archivos montados cambiaron. Rollback al commit anterior si el nodo no queda sano en 180 s (los servicios con `discordia.deploy.optional=true` solo generan un aviso) |
 
 Los dos corren como root, toman el mismo lock (un deploy por vez en cada nodo) y aceptan solo el SHA
@@ -134,7 +134,8 @@ regla edge:8001, Chat no llega a Auth y los DMs fallan cerrados (503), aunque lo
 2. Crear `/etc/discordia/nodes.env` (permisos 600) con `COMPOSE_PROFILES=<nodo>`, las IPs privadas de los
    otros nodos, el RDS (`DB_HOST`, `DB_USER`, `DB_PASSWORD`), un `<SERVICIO>_TAG` por servicio del nodo y
    los secretos de ese nodo (lista completa en `.env.example`). **Todos los secretos tienen que estar
-   definidos**: los defaults del compose son solo para desarrollo. El CD necesita que cada `<SERVICIO>_TAG`
+   definidos**: los defaults del compose son solo para desarrollo. `RABBITMQ_*` y `LIVEKIT_*` no tienen
+   default: si faltan, RabbitMQ, LiveKit y sus clientes no arrancan. El CD necesita que cada `<SERVICIO>_TAG`
    exista, porque guarda el anterior para el rollback.
 3. Verificar `/etc/discordia/node-name` (`edge`, `realtime` o `infra`; lo escribe cloud-init): el script de
    deploy rechaza una imagen de otro nodo.

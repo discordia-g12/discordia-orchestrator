@@ -13,7 +13,9 @@
 #   docker compose -f deploy/docker-compose.yml up -d --build
 #
 # Secretos: los defaults de abajo son SOLO para local. En producción el .env del nodo los pisa todos
-# (ver .env.example).
+# (ver .env.example). Los de RabbitMQ y LiveKit no tienen default: sus valores de desarrollo están en
+# .env.example. Si faltan en un nodo quedan vacíos, el servicio no arranca y el deploy vuelve atrás, en vez
+# de quedar corriendo con una clave que está en el repo.
 #
 # Imágenes: en local se construyen desde cada repo (build). En producción se bajan de GHCR, donde las
 # publica el CI de cada repo: REGISTRY=ghcr.io/discordia-g12 y un tag por servicio (<SERVICIO>_TAG) con
@@ -144,8 +146,8 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AUTH_AWS_SECRET_ACCESS_KEY:-}
       RABBITMQ_HOST: ${INFRA_HOST:-host.docker.internal}
       RABBITMQ_PORT: "5672"
-      RABBITMQ_USER: ${RABBITMQ_USER:-admin}
-      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-admin}
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
     depends_on:
       local-postgres:
         condition: service_healthy
@@ -215,8 +217,8 @@ services:
       AWS_SECRET_ACCESS_KEY: ${SERVER_ROLES_AWS_SECRET_ACCESS_KEY:-}
       RABBITMQ_HOST: ${INFRA_HOST:-host.docker.internal}
       RABBITMQ_PORT: "5672"
-      RABBITMQ_USER: ${RABBITMQ_USER:-admin}
-      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-admin}
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
     depends_on:
       local-postgres:
         condition: service_healthy
@@ -278,7 +280,7 @@ services:
       - CORE_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8002
       # Id canónico y relaciones contra Auth (nodo edge): sin esto el inbox y los DMs responden 503
       - AUTH_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8001
-      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@${INFRA_HOST:-host.docker.internal}:5672/
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${INFRA_HOST:-host.docker.internal}:5672/
       - RABBITMQ_EXCHANGE=server.events
       - NODE_OPTIONS=--max-old-space-size=192
     depends_on:
@@ -354,8 +356,8 @@ services:
       - PORT=8080
       - REDIS_HOST=voice-redis
       - REDIS_PORT=6379
-      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
-      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-devsecret_change_me_min_32_chars_long}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
       - LIVEKIT_URL=http://livekit:7880
       # Señalización por Kong. Producción: wss://api.discordia.lol/livekit
       - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL:-ws://localhost:8000/livekit}
@@ -364,7 +366,7 @@ services:
       # nodo, por nombre). Sin Chat, iniciar o aceptar una llamada responde 503; cortar sigue andando (ADR-04)
       - CHAT_SERVICE_URL=http://chat-engine-service:3000
       # Eventos member.banned / kicked / left (nodo infra): saca al usuario de la llamada
-      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@${INFRA_HOST:-host.docker.internal}:5672/
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${INFRA_HOST:-host.docker.internal}:5672/
       - RABBITMQ_EXCHANGE=server.events
       - NODE_OPTIONS=--max-old-space-size=192
     depends_on:
@@ -395,10 +397,10 @@ services:
       - "7881:7881"     # Media por TCP (respaldo): clientes, directo
       - "7882:7882/udp" # Media por UDP: clientes, directo
     environment:
-      - "LIVEKIT_KEYS=${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:-devsecret_change_me_min_32_chars_long}"
+      - "LIVEKIT_KEYS=${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
       # IP que LiveKit anuncia para la media: en producción, la Elastic IP del nodo
       - NODE_IP=${LIVEKIT_NODE_IP:-127.0.0.1}
-      - LIVEKIT_WEBHOOK_API_KEY=${LIVEKIT_API_KEY:-devkey}
+      - LIVEKIT_WEBHOOK_API_KEY=${LIVEKIT_API_KEY}
     volumes:
       - ../livekit/livekit.yaml:/etc/livekit.yaml:ro
     healthcheck:
@@ -458,7 +460,7 @@ services:
       - CHAT_ENGINE_URL=http://chat-engine-service:3000
       - CORE_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8002
       # Eventos de moderación para auditoría (nodo infra) y permisos contra Core (nodo edge)
-      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@${INFRA_HOST:-host.docker.internal}:5672/
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${INFRA_HOST:-host.docker.internal}:5672/
       - RABBITMQ_EXCHANGE=server.events
       - SERVER_ROLES_URL=http://${EDGE_HOST:-host.docker.internal}:8002
     depends_on:
@@ -573,8 +575,8 @@ services:
       - "5672:5672"              # AMQP: workers de outbox (edge) y consumidores (realtime)
       - "127.0.0.1:15672:15672"  # Panel: solo desde el host (en producción, port forwarding por SSM)
     environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-admin}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-admin}
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
       - ../rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
