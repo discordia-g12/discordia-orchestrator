@@ -11,7 +11,7 @@ Al cerrar un ítem, borrarlo de acá (y mencionarlo en el PR).
 |-----------|-------|---------|
 | **Alta** | R2 | Una dependencia sin fijar ya tiró un servicio |
 | **Media** | C1, V2, D1, D2, I1, M1, M6, V9 | Permisos que no se actualizan en vivo, usuario maestro compartido, TLS sin validar, estado de Terraform en una sola máquina, puertos internos sin autenticación, identidad partida por alias |
-| **Baja** | R1, P1, P2, V3, V4, V5, V6, V7, V8, C3, C4, C5, C6, I2, M2, M3, M4, M5, M7 | Payments todavía no tiene funcionalidad, mejoras de diseño, limpieza después del deploy, o solo hacen falta si el sistema crece |
+| **Baja** | R1, P1, P2, V3, V4, V5, V6, V7, V8, C3, C4, C5, I2, M2, M3, M4, M5, M7 | Payments todavía no tiene funcionalidad, mejoras de diseño, limpieza después del deploy, o solo hacen falta si el sistema crece |
 
 ---
 
@@ -61,7 +61,6 @@ Verificación: el CI de cada repo en verde y levantar `deploy/docker-compose.yml
 | C1 | **Aplicar en vivo los cambios de rol** | `EventConsumer` solo se suscribe a `member.*` y solo maneja `banned`, `kicked`, `left`, `muted` y `unmuted`. Si a alguien le sacan un rol (`member.role_removed`) o un rol pierde `SEND_MESSAGES` (`role.permissions_updated`, `role.deleted`), la sesión abierta sigue con `canSend: true` hasta que reconecta. Para `member.role_*` alcanza con volver a llamar a `/internal/channels/{id}/access` para las sesiones de ese usuario en ese servidor y mandar `PERMISSIONS_UPDATED` con el `canSend` nuevo (y cerrar la sesión si ya no puede ver el canal). Para `role.*` el evento no trae `user_id` (hoy `handleEvent` lo descarta): o se rechequean todas las sesiones del servidor, o Server-Roles agrega la lista de usuarios afectados al payload. Lo mismo pasa con `channel.deleted`: las sesiones de un canal borrado quedan abiertas. |
 | C3 | Más de una instancia del chat | Hoy hay una sola. Si se agregan más hacen falta dos cosas: una cola por instancia (`RABBITMQ_QUEUE` distinto, idealmente `exclusive`/`auto-delete` con el nombre del contenedor) porque `chat_engine_events` es compartida y cada evento le llega a una sola instancia, y el pub/sub de Redis para repartir los mensajes, porque hoy el broadcast es solo a los sockets de la misma instancia (`SessionManager` en memoria; el cliente Redis ya está creado pero no se usa para eso). |
 | C5 | Fijados sin auditoría | Fijar y desfijar en un servidor (`PUT`/`DELETE /channels/:id/messages/:mid/pin`, ADR-05 de Chat) no deja rastro en el audit log, a diferencia del borrado por un moderador. Publicar `message.pinned` / `message.unpinned` como `message.deleted_by_moderator` y sumarlos a `AUDIT_ROUTING_KEYS`, al mapper y a las acciones de Notification-Audit-Metrics. |
-| C6 | Mobile no escucha `MESSAGE_DELETED` en canales | `MobileShell` abre el socket del canal sin `onMessageDeleted`: un mensaje que borra otro sigue visible (y en la lista de fijados) hasta recargar el canal. Los DMs sí lo reciben por el inbox. Sumar el handler y sacar el mensaje de los fijados con `syncPinnedMessage`. |
 | C4 | Límite del historial | `limit` viene de la query sin tope (`?limit=1000000` le pide todo el canal a Atlas M0) y `getMissedMessages` no tiene límite. Poner un máximo (ej. 100) y validar `before` / `last_message_id_seen` como ObjectId. |
 
 ## Mensajes directos (Auth, Chat, Server-Roles y clientes)
