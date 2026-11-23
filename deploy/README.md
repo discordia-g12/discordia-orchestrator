@@ -56,6 +56,19 @@ llamada responde 503 y cortarla sigue andando. Va a `main` antes que los servici
 variable cae al mismo default (`http://chat-engine-service:3000`), pero así queda explícito
 ([ADR 0015](../org-docs/docs/architecture/decisions/0015-llamadas-privadas.md)).
 
+**Inbox interno (V9):** `POST /internal/inbox/events` de Chat exige el header `X-Internal-Token` igual a
+`INTERNAL_API_TOKEN`; lo mandan Voice (avisos de llamadas) y Notification (avisos en vivo). Los tres están en
+realtime y leen la misma variable del `nodes.env`. Si la variable está vacía, Chat no la exige: es el modo de
+transición. Orden en producción:
+
+1. Mergear a `main` el compose con `INTERNAL_API_TOKEN` (pasa vacío: nada cambia).
+2. Desplegar Chat y Voice con soporte para el token (y Notification, cuando lo use).
+3. Agregar `INTERNAL_API_TOKEN=<openssl rand -hex 32>` al `nodes.env` de realtime y recrear los tres
+   contenedores (`deploy-config`, o `docker compose ... up -d --no-build chat-engine-service
+   voice-signaling-service notification-service`). Verificar que una llamada privada sigue sonando.
+
+Si se carga antes del paso 2, Voice recibe `401` y las llamadas privadas no avisan.
+
 **Cada nodo tiene su propia red de Docker.** Los contenedores de un nodo se ven por nombre entre ellos,
 pero no ven los de otro nodo: lo que cruza de un nodo a otro va a la IP del host y al puerto publicado,
 igual que entre máquinas distintas.

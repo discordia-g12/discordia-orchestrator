@@ -282,6 +282,8 @@ services:
       - AUTH_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8001
       - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${INFRA_HOST:-host.docker.internal}:5672/
       - RABBITMQ_EXCHANGE=server.events
+      # Secreto que exige POST /internal/inbox/events (lo mandan Voice y Notification, V9). Vacío: no se exige
+      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:-}
       - NODE_OPTIONS=--max-old-space-size=192
     depends_on:
       chat-redis:
@@ -365,6 +367,7 @@ services:
       # Llamadas privadas: call-access, id canónico y aviso por el inbox contra /internal/* de Chat (mismo
       # nodo, por nombre). Sin Chat, iniciar o aceptar una llamada responde 503; cortar sigue andando (ADR-04)
       - CHAT_SERVICE_URL=http://chat-engine-service:3000
+      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:-}
       # Eventos member.banned / kicked / left (nodo infra): saca al usuario de la llamada
       - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${INFRA_HOST:-host.docker.internal}:5672/
       - RABBITMQ_EXCHANGE=server.events
@@ -458,6 +461,8 @@ services:
       # Chat (mismo nodo, por nombre) y de Server-Roles (nodo edge, por IP). Si alguno no responde, el dato
       # sale en null con partial: true (ADR-05 de Notification).
       - CHAT_ENGINE_URL=http://chat-engine-service:3000
+      # Avisos en vivo por el inbox de Chat (/internal/inbox/events, mismo secreto que Chat)
+      - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:-}
       - CORE_SERVICE_URL=http://${EDGE_HOST:-host.docker.internal}:8002
       # Eventos de moderación para auditoría (nodo infra) y permisos contra Core (nodo edge)
       - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${INFRA_HOST:-host.docker.internal}:5672/

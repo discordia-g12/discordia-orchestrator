@@ -296,7 +296,7 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 | Chat | Server-Roles `/internal/servers/{id}/member-ids` | HTTP síncrono | `EDGE_HOST:8002` — al recibir `server.updated`, para avisar a los miembros por el inbox |
 | Voice | Server-Roles `/internal/channels/{id}/can-connect` | HTTP síncrono (timeout + 3 reintentos) | `EDGE_HOST:8002` — al unirse a voz |
 | Voice | Chat `/internal/conversations/{id}/call-access`, `/internal/users/{id}/canonical` | HTTP síncrono (timeout 2 s, 3 intentos) | mismo nodo (`chat-engine-service:3000`) — al iniciar, aceptar, rechazar o cortar una llamada privada; si no responde, iniciar y aceptar dan 503 |
-| Voice | Chat `/internal/inbox/events` | HTTP síncrono (timeout 2 s, sin reintento) | mismo nodo — avisa `CALL_RINGING` / `CALL_ACCEPTED` / `CALL_ENDED` por el inbox de los dos |
+| Voice | Chat `/internal/inbox/events` | HTTP síncrono (timeout 2 s, sin reintento), con `X-Internal-Token` | mismo nodo — avisa `CALL_RINGING` / `CALL_ACCEPTED` / `CALL_ENDED` por el inbox de los dos |
 | Notification | Chat `/internal/metrics/messages` | HTTP síncrono (timeout 2 s) | mismo nodo (`chat-engine-service:3000`) — métricas globales del backoffice; si no responde, ese dato sale en `null` |
 | Notification | Server-Roles `/internal/metrics/servers` | HTTP síncrono (timeout 2 s) | `EDGE_HOST:8002` — métricas globales del backoffice; si no responde, ese dato sale en `null` |
 | Auth / Server-Roles (workers) | RabbitMQ | AMQP (publica) | `INFRA_HOST:5672` |
@@ -863,7 +863,8 @@ Archivos:
   - `COMPOSE_PROFILES`, `REGISTRY` y un `<SERVICIO>_TAG` por servicio (lo actualiza el CD);
   - `EDGE_HOST`, `REALTIME_HOST` e `INFRA_HOST`;
   - el RDS (`DB_HOST`, `DB_USER`, `DB_PASSWORD`; en realtime también `NOTIFICATION_DB_SSLMODE=no-verify`);
-  - los secretos del nodo.
+  - los secretos del nodo. En realtime, `INTERNAL_API_TOKEN`: lo comparten Chat, Voice y Notification para
+    `/internal/inbox/events`; vacío, Chat no lo exige (transición, ver `deploy/README.md`).
 
   Generar los secretos con `openssl rand -hex 32` (no `-base64`: sus `/ + =` rompen las URLs).
 - Estado del CD: `/etc/discordia/config-sha` (última configuración aplicada), `/var/log/discordia-deploy.log`
