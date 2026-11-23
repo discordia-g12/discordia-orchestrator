@@ -297,6 +297,7 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 | Voice | Server-Roles `/internal/channels/{id}/can-connect` | HTTP síncrono (timeout + 3 reintentos) | `EDGE_HOST:8002` — al unirse a voz |
 | Voice | Chat `/internal/conversations/{id}/call-access`, `/internal/users/{id}/canonical` | HTTP síncrono (timeout 2 s, 3 intentos) | mismo nodo (`chat-engine-service:3000`) — al iniciar, aceptar, rechazar o cortar una llamada privada; si no responde, iniciar y aceptar dan 503 |
 | Voice | Chat `/internal/inbox/events` | HTTP síncrono (timeout 2 s, sin reintento), con `X-Internal-Token` | mismo nodo — avisa `CALL_RINGING` / `CALL_ACCEPTED` / `CALL_ENDED` por el inbox de los dos |
+| Notification | Chat `/internal/inbox/events` | HTTP síncrono (timeout 2 s, sin reintento), con `X-Internal-Token` | mismo nodo — `NOTIFICATION_CREATED` en lotes de 10; si falla, el aviso queda en la bandeja |
 | Notification | Chat `/internal/metrics/messages` | HTTP síncrono (timeout 2 s) | mismo nodo (`chat-engine-service:3000`) — métricas globales del backoffice; si no responde, ese dato sale en `null` |
 | Notification | Server-Roles `/internal/metrics/servers` | HTTP síncrono (timeout 2 s) | `EDGE_HOST:8002` — métricas globales del backoffice; si no responde, ese dato sale en `null` |
 | Auth / Server-Roles (workers) | RabbitMQ | AMQP (publica) | `INFRA_HOST:5672` |
@@ -341,12 +342,14 @@ que el cambio. Un worker aparte lo publica en RabbitMQ (al menos una vez; los co
 | Productor | Exchange (topic) | Eventos |
 |---|---|---|
 | Auth-User | `user.events` | `user.registered`, `user.profile.updated` |
+| Chat-Engine | `server.events` | `message.deleted_by_moderator`, `chat.message.created` (hoy solo respuestas de hilo con participantes para avisar, ADR-07 de Chat) |
 | Server-Roles | `server.events` | `server.updated` (nombre, descripción, ícono o banner), `server.deleted`, `channel.created/updated/deleted`, `channels.reordered`, `category.created/updated/deleted`, `categories.reordered`, `role.permissions_updated`, `role.deleted`, `member.role_assigned/removed`, `member.left`, `member.kicked`, `member.banned/unbanned`, `member.muted/unmuted` |
 
 | Consumidor | Cola | Binding | Qué hace |
 |---|---|---|---|
 | Chat-Engine | `chat_engine_events` (durable) | `member.*` | ban / kick / salida → cierra el WebSocket; mute / unmute → habilita o bloquea el envío |
 | Chat-Engine | `chat_engine_events` (durable) | `server.updated` | Pide los miembros a Server-Roles y les manda `SERVER_UPDATED` por el inbox; el cliente vuelve a pedir sus servidores ([ADR 0013](../org-docs/docs/architecture/decisions/0013-cambios-de-servidor-en-vivo.md)) |
+| Notification | `notification_message_events` (durable, DLQ `notification_message_events.dlq`, prefetch 10) | `chat.message.created`, `channel.deleted`, `server.deleted` | Guarda los avisos según las preferencias de cada participante y los avisa en vivo por el inbox de Chat; borra avisos y preferencias de un canal o servidor borrado (ADR-07 de Notification) |
 | Voice-Signaling | `voice_signaling_events` (durable) | `member.banned`, `member.kicked`, `member.left` | Saca al usuario de la llamada de ese servidor y lo bloquea para que no vuelva a entrar con un token viejo |
 | Voice-Signaling | `voice_signaling_events` (durable) | `user.suspended` (`user.events`) | Saca la cuenta de los canales de voz y termina su llamada privada (`unavailable`) |
 
