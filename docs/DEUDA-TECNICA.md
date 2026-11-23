@@ -33,17 +33,18 @@ Payments. Cada paso es un PR por repo, y el CI de cada uno ya construye la image
      `dist/` y las de producción). Su CI corre los tests **dentro de la imagen** (`docker compose run`), así
      que hay que pasarlo a `actions/setup-node` como Chat, o correr los tests sobre la etapa de build
      (`target: build`).
-   - Node 20 → 22, igual que el WebApp: `FROM node:22-alpine`, `.nvmrc` con `22` y
-     `node-version-file: .nvmrc` en el CI (Chat y Notification hoy tienen `"20"` fijo).
+   - Las imágenes ya están en `node:26-alpine`. Falta que el CI pruebe con la misma versión:
+     `.nvmrc` con `26` y `node-version-file: .nvmrc`. Notification ya lo tiene; Chat sigue con `"20"` fijo.
 3. **Payments.** Igual que Server-Roles. No tiene funcionalidad todavía, pero el cambio es chico y es el
    repo que ya se rompió por esto.
 4. **Imágenes de terceros.** Fijar `nginx:alpine` (WebApp) a una versión (`nginx:1.xx-alpine`) y
    `rabbitmq:3-management-alpine` a `3.13-management-alpine`. La rama 3.x de RabbitMQ ya no tiene soporte
    comunitario, pero pasar a 4.x es un cambio aparte (hay que habilitar los feature flags antes de
    actualizar). Verificar hasta cuándo tiene soporte Kong 3.4.
-5. **Fastify 4 en Voice y Notification.** No tiene soporte desde junio de 2025 (Chat ya está en Fastify 5).
-   Migrar a Fastify 5 (y `@fastify/websocket` 11 en Voice) es un cambio de versión mayor: hacerlo en un PR
-   aparte, después de fijar todo lo demás y con los tests como red.
+5. **Fastify 4 en Voice.** No tiene soporte desde junio de 2025 (Chat y Notification ya están en Fastify 5).
+   Migrar a Fastify 5 (y `@fastify/websocket` 11) es un cambio de versión mayor: hacerlo en un PR aparte, con
+   los tests como red. En Notification el único cambio de comportamiento fue de timing: `ready()` resuelve
+   unos ticks más tarde, y los tests que suponían que la primera ronda seguía en curso tuvieron que cambiar.
 6. **Dependabot** en cada repo (`.github/dependabot.yml`): ecosistemas `pip` o `npm`, `docker` y
    `github-actions`, semanal, con las actualizaciones *minor* y *patch* agrupadas en un solo PR. Así las
    versiones se actualizan con CI en vez de cambiar solas en el próximo build.
@@ -94,7 +95,7 @@ y en el ADR-04 de Voice-Signaling-Session-Service.
 | V6 | Un bloqueo no corta una llamada activa | `call-access` se consulta al iniciar y al aceptar. Si uno bloquea al otro durante la llamada, sigue hasta que alguien corte. Para cortarla, Auth tendría que avisar el bloqueo (hoy no publica eventos de relaciones, ver M2) y Voice terminarla con `unavailable`. |
 | V7 | Sin aviso con la app cerrada | La llamada suena solo si el inbox está conectado. Es el mismo push que falta para los DM (M3), con un requisito más: en mobile, una llamada entrante necesita notificación de alta prioridad (CallKit / ConnectionService) para sonar con el teléfono bloqueado. |
 | V8 | La llamada no queda en el chat | Ni "llamada perdida" ni la duración aparecen en la conversación: quien no estaba conectado no se entera de que lo llamaron. Voice podría pedirle a Chat que guarde un mensaje de sistema al terminar (otro endpoint interno), con cuidado de no contarlo como no leído de quien llamó. |
-| V9 | `POST /internal/inbox/events` de Chat protegido solo por red | Quien llegue al 3000 de realtime sin pasar por Kong puede publicar un `CALL_*` en el inbox de cualquiera (por Kong responde 404). Mismo caso que el resto de `/internal` (M1, P1): un secreto compartido entre servicios o mTLS lo cerraría para todos. |
+| V9 | `POST /internal/inbox/events` de Chat: secreto opcional | Exige `X-Internal-Token` (`INTERNAL_API_TOKEN`, compartido con Voice y Notification), pero solo si la variable está cargada: sin ella, quien llegue al 3000 de realtime sin pasar por Kong puede publicar un `CALL_*` o `NOTIFICATION_*` en el inbox de cualquiera. Falta cargarla en el `nodes.env` de realtime y después volverla obligatoria (que Chat no arranque sin ella). El resto de `/internal` (M1, P1) sigue protegido solo por red: el mismo helper (`requireInternalToken`) sirve para cerrarlo. |
 Un startup_failure en main no avisa a nadie, y el deploy de Voice estuvo frenado 6 días sin que se notara. Lo sumaría a docs/DEUDA-TECNICA.md: avisar cuando falla el CD de main (notificaciones de Actions o un check periódico que compare el SHA desplegado con el de main).
 
 ## Permisos entre servicios
@@ -116,7 +117,7 @@ Un startup_failure en main no avisa a nadie, y el deploy de Voice estuvo frenado
 | # | Qué falta | Detalle |
 |---|-----------|---------|
 | R1 | `--reload` en los Dockerfiles de Payments y Server-Roles | El `CMD` de los dos es `uvicorn ... --reload` (modo desarrollo: un proceso extra que vigila los archivos y reinicia el servicio si cambian). En Server-Roles el compose de `deploy/` lo pisa; en Payments no, así que corre así en producción. Payments todavía no tiene funcionalidad, por eso es prioridad baja, pero conviene sacarlo de los dos Dockerfiles antes de que tenga tráfico. |
-| R2 | **Fijar versiones de dependencias** | Auth tiene todo fijado con `==`. Server-Roles tiene todo con `>=` (incluido `sqlalchemy>=2.0`, el mismo caso que rompió Payments) e instala `pytest` y `httpx` en la imagen de producción. Payments no fija casi nada. En Node hay `package-lock.json`, pero los Dockerfiles usan `npm install`. Chat, Voice y Notification siguen en Node 20, que ya no tiene soporte, y Voice y Notification en Fastify 4, que tampoco. `nginx:alpine` y `rabbitmq:3-management-alpine` no fijan versión. Plan arriba. |
+| R2 | **Fijar versiones de dependencias** | Auth tiene todo fijado con `==`. Server-Roles tiene todo con `>=` (incluido `sqlalchemy>=2.0`, el mismo caso que rompió Payments) e instala `pytest` y `httpx` en la imagen de producción. Payments no fija casi nada. En Node hay `package-lock.json`, pero los Dockerfiles usan `npm install`. Las imágenes de Chat, Voice y Notification ya usan Node 26, pero el CI de Chat prueba con Node 20, y Voice sigue en Fastify 4, que ya no tiene soporte. `nginx:alpine` y `rabbitmq:3-management-alpine` no fijan versión. Plan arriba. |
 
 ## Infraestructura
 
