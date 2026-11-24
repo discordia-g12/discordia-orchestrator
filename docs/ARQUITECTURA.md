@@ -299,6 +299,9 @@ Prometheus y Grafana **no se publican** (quedan en `127.0.0.1` del host; se acce
 | Voice | Chat `/internal/inbox/events` | HTTP síncrono (timeout 2 s, sin reintento), con `X-Internal-Token` | mismo nodo — avisa `CALL_RINGING` / `CALL_ACCEPTED` / `CALL_ENDED` por el inbox de los dos |
 | Notification | Chat `/internal/inbox/events` | HTTP síncrono (timeout 2 s, sin reintento), con `X-Internal-Token` | mismo nodo — `NOTIFICATION_CREATED` en lotes de 10; si falla, el aviso queda en la bandeja |
 | Notification | Chat `/internal/metrics/messages` | HTTP síncrono (timeout 2 s) | mismo nodo (`chat-engine-service:3000`) — métricas globales del backoffice; si no responde, ese dato sale en `null` |
+| Notification | Server-Roles `/internal/servers/{id}/member-ids` y `/internal/servers/{id}/roles/{role}/member-ids` | HTTP síncrono (timeout 2 s) | `EDGE_HOST:8002` — `@everyone`, menciones de rol y nivel `all`; solo si el mensaje los tiene o alguien pidió `all`. Si no responde, el evento va a la DLQ (un 404 no avisa a nadie) |
+| Notification | Server-Roles `POST /internal/channels/{id}/viewers` | HTTP síncrono (timeout 2 s) | `EDGE_HOST:8002` — en cada mensaje de servidor con candidatos, deja solo a quienes pueden ver el canal, así el preview de un canal privado no le llega a quien no lo ve. Si no responde, el evento va a la DLQ: nunca se avisa sin filtrar |
+| Notification | Expo Push API (`exp.host`) y servicios de Web Push | HTTPS saliente | internet — push después de guardar el aviso; si falla, la bandeja no cambia (ADR-08 de Notification) |
 | Notification | Server-Roles `/internal/metrics/servers` | HTTP síncrono (timeout 2 s) | `EDGE_HOST:8002` — métricas globales del backoffice; si no responde, ese dato sale en `null` |
 | Auth / Server-Roles (workers) | RabbitMQ | AMQP (publica) | `INFRA_HOST:5672` |
 | Chat | RabbitMQ | AMQP (consume `member.*`, `role.*`, `server.deleted`, `server.updated`, `channel.deleted`, `user.suspended`) | `INFRA_HOST:5672` |
@@ -342,14 +345,14 @@ que el cambio. Un worker aparte lo publica en RabbitMQ (al menos una vez; los co
 | Productor | Exchange (topic) | Eventos |
 |---|---|---|
 | Auth-User | `user.events` | `user.registered`, `user.profile.updated` |
-| Chat-Engine | `server.events` | `message.deleted_by_moderator`, `chat.message.created` (hoy solo respuestas de hilo con participantes para avisar, ADR-07 de Chat) |
+| Chat-Engine | `server.events` | `message.deleted_by_moderator`, `chat.message.created` (todo mensaje de DM, con `recipient_ids`, y de canal de servidor; las respuestas de hilo con sus participantes; ADR-07 de Chat, ADR 0017) |
 | Server-Roles | `server.events` | `server.updated` (nombre, descripción, ícono o banner), `server.deleted`, `channel.created/updated/deleted`, `channels.reordered`, `category.created/updated/deleted`, `categories.reordered`, `role.permissions_updated`, `role.deleted`, `member.role_assigned/removed`, `member.left`, `member.kicked`, `member.banned/unbanned`, `member.muted/unmuted` |
 
 | Consumidor | Cola | Binding | Qué hace |
 |---|---|---|---|
 | Chat-Engine | `chat_engine_events` (durable) | `member.*` | ban / kick / salida → cierra el WebSocket; mute / unmute → habilita o bloquea el envío |
 | Chat-Engine | `chat_engine_events` (durable) | `server.updated` | Pide los miembros a Server-Roles y les manda `SERVER_UPDATED` por el inbox; el cliente vuelve a pedir sus servidores ([ADR 0013](../org-docs/docs/architecture/decisions/0013-cambios-de-servidor-en-vivo.md)) |
-| Notification | `notification_message_events` (durable, DLQ `notification_message_events.dlq`, prefetch 10) | `chat.message.created`, `channel.deleted`, `server.deleted` | Guarda los avisos según las preferencias de cada participante y los avisa en vivo por el inbox de Chat; borra avisos y preferencias de un canal o servidor borrado (ADR-07 de Notification) |
+| Notification | `notification_message_events` (durable, DLQ `notification_message_events.dlq`, prefetch 10) | `chat.message.created`, `channel.deleted`, `server.deleted` | Arma los candidatos (mención > DM > hilo > nivel `all`), guarda los avisos según las preferencias, los avisa en vivo por el inbox de Chat y manda push; borra avisos y preferencias de un canal o servidor borrado (ADR-07 de Notification) |
 | Voice-Signaling | `voice_signaling_events` (durable) | `member.banned`, `member.kicked`, `member.left` | Saca al usuario de la llamada de ese servidor y lo bloquea para que no vuelva a entrar con un token viejo |
 | Voice-Signaling | `voice_signaling_events` (durable) | `user.suspended` (`user.events`) | Saca la cuenta de los canales de voz y termina su llamada privada (`unavailable`) |
 
@@ -867,7 +870,9 @@ Archivos:
   - `EDGE_HOST`, `REALTIME_HOST` e `INFRA_HOST`;
   - el RDS (`DB_HOST`, `DB_USER`, `DB_PASSWORD`; en realtime también `NOTIFICATION_DB_SSLMODE=no-verify`);
   - los secretos del nodo. En realtime, `INTERNAL_API_TOKEN`: lo comparten Chat, Voice y Notification para
-    `/internal/inbox/events`; vacío, Chat no lo exige (transición, ver `deploy/README.md`).
+    `/internal/inbox/events`; vacío, Chat no lo exige (transición, ver `deploy/README.md`). También en realtime,
+    `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (push web; sin ellas queda apagado) y, opcional,
+    `EXPO_ACCESS_TOKEN` (ADR-08 de Notification).
 
   Generar los secretos con `openssl rand -hex 32` (no `-base64`: sus `/ + =` rompen las URLs).
 - Estado del CD: `/etc/discordia/config-sha` (última configuración aplicada), `/var/log/discordia-deploy.log`

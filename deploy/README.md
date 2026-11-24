@@ -69,6 +69,19 @@ transición. Orden en producción:
 
 Si se carga antes del paso 2, Voice recibe `401` y las llamadas privadas no avisan.
 
+**Push (ADR-08 de Notification):** Notification manda push a mobile por la API de Expo y a la web por Web
+Push (VAPID). Variables de realtime: `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` (un par por entorno, con
+`npx web-push generate-vapid-keys`), `VAPID_SUBJECT=mailto:<contacto>` y, solo si el proyecto de Expo tiene push
+seguro, `EXPO_ACCESS_TOKEN`. Sin las tres VAPID el push web queda apagado (`/push/vapid-public-key` da `null`) y
+el resto anda igual. Sale a `exp.host` y a los servicios de push del navegador por HTTPS: el Security Group ya
+deja todo el egress, no hay regla nueva. Cambiar el par VAPID invalida las suscripciones web: cada usuario
+tiene que volver a activar el push.
+
+Notification también llama a Server-Roles (`EDGE_HOST:8002`) para `@everyone`, menciones de rol y el nivel
+`all` (`/internal/servers/{id}/member-ids` y `/internal/servers/{id}/roles/{role}/member-ids`). Usa el
+`SERVER_ROLES_URL` que ya tenía: va a `main` después de Server-Roles con el endpoint de roles; antes, una
+mención de rol no avisa a nadie (404) pero no falla.
+
 **Cada nodo tiene su propia red de Docker.** Los contenedores de un nodo se ven por nombre entre ellos,
 pero no ven los de otro nodo: lo que cruza de un nodo a otro va a la IP del host y al puerto publicado,
 igual que entre máquinas distintas.

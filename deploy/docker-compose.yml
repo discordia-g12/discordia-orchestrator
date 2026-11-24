@@ -468,6 +468,11 @@ services:
       - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${INFRA_HOST:-host.docker.internal}:5672/
       - RABBITMQ_EXCHANGE=server.events
       - SERVER_ROLES_URL=http://${EDGE_HOST:-host.docker.internal}:8002
+      # Push (ADR-08 de Notification). Sin las tres VAPID, el push web queda apagado; Expo anda sin token.
+      - EXPO_ACCESS_TOKEN=${EXPO_ACCESS_TOKEN:-}
+      - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
+      - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
+      - VAPID_SUBJECT=${VAPID_SUBJECT:-}
     depends_on:
       local-postgres:
         condition: service_healthy
