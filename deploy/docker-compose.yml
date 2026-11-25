@@ -284,6 +284,12 @@ services:
       - RABBITMQ_EXCHANGE=server.events
       # Secreto que exige POST /internal/inbox/events (lo mandan Voice y Notification, V9). Vacío: no se exige
       - INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN:-}
+      # Adjuntos en S3 (prefijo privado attachments/, URLs firmadas) con el usuario IAM propio del servicio.
+      # Vacío: quedan en el disco del contenedor (solo para desarrollo: se pierden en cada deploy)
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - S3_BUCKET=${S3_BUCKET:-}
+      - AWS_ACCESS_KEY_ID=${CHAT_AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${CHAT_AWS_SECRET_ACCESS_KEY:-}
       - NODE_OPTIONS=--max-old-space-size=192
     depends_on:
       chat-redis:

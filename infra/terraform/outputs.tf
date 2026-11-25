@@ -32,7 +32,7 @@ output "cloudflare_trusted_ips" {
 }
 
 output "media_bucket" {
-  description = "S3_BUCKET y S3_PUBLIC_BASE_URL de Auth y Server-Roles"
+  description = "S3_BUCKET y S3_PUBLIC_BASE_URL de Auth y Server-Roles (Chat-Engine solo usa S3_BUCKET: firma las URLs)"
   value = {
     name            = aws_s3_bucket.media.bucket
     public_base_url = "https://${aws_s3_bucket.media.bucket_regional_domain_name}"

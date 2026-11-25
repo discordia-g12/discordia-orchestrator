@@ -18,12 +18,15 @@ locals {
     infra    = "10.0.1.30"
   }
 
-  # Bucket de imágenes (storage.tf): qué servicio escribe en qué prefijo. Todos los prefijos son públicos.
+  # Bucket de medios (storage.tf): qué servicio escribe en qué prefijo.
   media_writers = {
     auth         = "avatars"
     server-roles = "server-icons"
+    chat         = "attachments"
   }
-  media_prefixes = values(local.media_writers)
+  # Se leen sin firma, pero solo desde las páginas de Discordia (Referer, ver storage.tf). attachments/ queda
+  # privado: Chat-Engine entrega URLs firmadas que vencen.
+  media_public_prefixes = ["avatars", "server-icons"]
 
   # Repos que despliegan con el rol discordia-cd (iam-cd.tf): los siete servicios y el orquestador (configuración).
   # Nombre → ID numérico: GitHub firma el "sub" del token OIDC en formato inmutable, con los IDs de la org y del

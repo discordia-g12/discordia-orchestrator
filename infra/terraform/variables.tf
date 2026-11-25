@@ -48,6 +48,24 @@ variable "media_bucket_name" {
   default     = "discordia-g12-media"
 }
 
+variable "media_allowed_referers" {
+  description = <<-EOT
+    Páginas desde las que se pueden ver avatares, íconos y banners (condición aws:Referer de la bucket policy).
+    Abrir el link suelto o embeberlo en otro sitio da 403. La app mobile manda Referer https://app.discordia.lol/.
+    No es una barrera fuerte (un cliente puede inventar la cabecera): corta el hotlinking y el acceso casual.
+  EOT
+  type        = list(string)
+  default = [
+    "https://app.discordia.lol/*",
+    "https://backoffice.discordia.lol/*",
+    "https://discordia-webapp.pages.dev/*",
+    "https://*.discordia-webapp.pages.dev/*", # previews de Cloudflare Pages
+    "http://localhost:5173/*",                # web en desarrollo contra producción
+    "http://localhost:5174/*",                # backoffice en desarrollo
+    "http://localhost:8081/*",                # app mobile en el navegador (expo start --web)
+  ]
+}
+
 variable "budget_alert_email" {
   description = "Mail que recibe el aviso si alguna cuenta empieza a gastar plata real (pasados los créditos)"
   type        = string

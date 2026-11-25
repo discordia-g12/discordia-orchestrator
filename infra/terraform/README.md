@@ -22,15 +22,24 @@ El frontend (SPA) va en **Cloudflare Pages** (`pages.tf`).
 - **El RDS no lo crea ni lo administra Terraform**: ya existía. Terraform crea su red (grupo de subnets
   `discordia-data` y Security Group `discordia-rds`) y solo lee su endpoint (`terraform output rds_endpoint`).
   Así un error en el código nunca puede borrar la base.
-- **Imágenes en S3** (`storage.tf`): bucket `discordia-g12-media`, lectura pública solo en `avatars/` y
-  `server-icons/`. Cada servicio escribe con su propio usuario IAM (`discordia-auth-media`,
-  `discordia-server-roles-media`), limitado a su prefijo: no usa el rol de la EC2, así que funciona en
-  cualquier nodo. Después del `apply`:
+- **Imágenes en S3** (`storage.tf`): bucket `discordia-g12-media`.
+  - `avatars/` y `server-icons/` (avatares, íconos y banners) se leen sin firma, pero **solo desde las páginas
+    de Discordia**: la bucket policy exige un `Referer` de `media_allowed_referers` (la web, el backoffice, los
+    previews de Pages y localhost). Abrir el link suelto o embeberlo en otro sitio da 403. La app mobile manda
+    `Referer: https://app.discordia.lol/` (`apps/mobile/src/utils/remoteImage.ts`). No es una barrera fuerte:
+    alguien con curl puede inventar la cabecera.
+  - `attachments/` (adjuntos del chat y de los DMs) es **privado**: Chat-Engine guarda la URL sin firma y la
+    entrega firmada (SigV4, 24 h) solo dentro del mensaje de ese canal.
+
+  Cada servicio escribe con su propio usuario IAM (`discordia-auth-media`, `discordia-server-roles-media`,
+  `discordia-chat-media`), limitado a su prefijo: no usa el rol de la EC2, así que funciona en cualquier
+  nodo. Después del `apply`:
   1. Crear las access keys con los comandos de `terraform output media_access_key_commands` (no se crean
      en Terraform para que el secreto no quede en el estado).
   2. Cargar en el `nodes.env` del nodo de cada servicio `S3_BUCKET` y `S3_PUBLIC_BASE_URL`
      (`terraform output media_bucket`) y sus claves: `AUTH_AWS_ACCESS_KEY_ID` / `AUTH_AWS_SECRET_ACCESS_KEY`
-     y `SERVER_ROLES_AWS_ACCESS_KEY_ID` / `SERVER_ROLES_AWS_SECRET_ACCESS_KEY`.
+     y `SERVER_ROLES_AWS_ACCESS_KEY_ID` / `SERVER_ROLES_AWS_SECRET_ACCESS_KEY`. Chat-Engine (nodo realtime)
+     solo necesita `S3_BUCKET` y `CHAT_AWS_ACCESS_KEY_ID` / `CHAT_AWS_SECRET_ACCESS_KEY`.
 
   Si falla la bucket policy con `AccessDenied`, revisar que el *Block Public Access* de la cuenta no esté
   activo (S3 → Block Public Access settings for this account).
