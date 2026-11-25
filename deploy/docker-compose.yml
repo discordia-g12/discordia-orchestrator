@@ -620,6 +620,8 @@ services:
     environment:
       # Driver explícito: SQLAlchemy 2.1 cambió el default de postgresql:// a psycopg 3 (la imagen trae psycopg2)
       - DATABASE_URL=postgresql+psycopg2://${DB_USER:-postgres}:${DB_PASSWORD:-dev-postgres}@${DB_HOST:-host.docker.internal}:5432/payments_db
+      # Membresía antes de boostear (Server-Roles internal, nodo edge; regla infra → edge:8002 en Terraform)
+      - SERVER_ROLES_URL=http://${EDGE_HOST:-host.docker.internal}:8002
     depends_on:
       local-postgres:
         condition: service_healthy
