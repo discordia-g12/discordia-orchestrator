@@ -17,7 +17,7 @@ LOG_FILE=/var/log/discordia-deploy.log
 LOCK_FILE=/var/lock/discordia-deploy.lock
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}" # segundos
 
-# Imagen → "nodo variable-del-tag servicios de compose" (Auth y Server-Roles también reinician su worker)
+# Imagen → "nodo variable-del-tag servicios de compose" (Auth, Server-Roles y Payments también reinician su worker)
 declare -A SERVICES=(
   [gateway]="edge GATEWAY_TAG gateway"
   [auth-service]="edge AUTH_SERVICE_TAG auth-service auth-outbox-worker"
@@ -25,7 +25,7 @@ declare -A SERVICES=(
   [chat-engine-service]="realtime CHAT_ENGINE_TAG chat-engine-service"
   [voice-signaling-service]="realtime VOICE_SIGNALING_TAG voice-signaling-service"
   [notification-service]="realtime NOTIFICATION_TAG notification-service"
-  [payments-service]="infra PAYMENTS_TAG payments-service"
+  [payments-service]="infra PAYMENTS_TAG payments-service payments-outbox-worker"
 )
 
 # Por SSM puede no estar HOME, y docker lo necesita para encontrar el login de ghcr.io (/root/.docker)

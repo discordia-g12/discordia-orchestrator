@@ -639,6 +639,35 @@ services:
           memory: 192M
     networks: [infra]
 
+  # Publica el outbox de Payments en el exchange payments.events (ADR-001 de Payments, 2.8). Misma imagen que la
+  # API, como auth-outbox-worker y server-roles-outbox-worker. RabbitMQ está en el mismo nodo y red: por nombre.
+  payments-outbox-worker:
+    profiles: ["infra"]
+    image: ${REGISTRY:-discordia}/payments-service:${PAYMENTS_TAG:-local}
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.outbox_publisher"]
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://${DB_USER:-postgres}:${DB_PASSWORD:-dev-postgres}@${DB_HOST:-host.docker.internal}:5432/payments_db
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+    depends_on:
+      payments-service:
+        condition: service_healthy # ya corrió las migraciones (crea outbox_events)
+      rabbitmq:
+        condition: service_healthy
+    # Sin HTTP: el worker toca /tmp/outbox-heartbeat en cada vuelta sana (incluye estar conectado a RabbitMQ)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(0 if time.time() - os.stat('/tmp/outbox-heartbeat').st_mtime < 30 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.15"
+          memory: 96M
+    networks: [infra]
+
   # ======================================================================
   # SOLO LOCAL: Postgres que hace de RDS (profile local)
   # En producción la base es el RDS (DB_HOST). Acá se publica en el 5432 del host y los servicios le

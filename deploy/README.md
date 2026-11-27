@@ -112,9 +112,9 @@ redes de confianza: es la API sin TLS.
 **Probar que un nodo no tumba a los otros** (nombres de servicio: ver la tabla):
 
 ```bash
-docker compose -f deploy/docker-compose.yml stop rabbitmq payments-service   # "apagar" infra
+docker compose -f deploy/docker-compose.yml stop rabbitmq payments-service payments-outbox-worker   # "apagar" infra
 # el chat y la voz siguen andando; /readyz del chat (localhost:3000/readyz) muestra rabbitmq: disconnected
-docker compose -f deploy/docker-compose.yml start rabbitmq payments-service
+docker compose -f deploy/docker-compose.yml start rabbitmq payments-service payments-outbox-worker
 ```
 
 Para verificar el aislamiento entre redes: desde un contenedor de edge, un nombre de otro nodo no resuelve

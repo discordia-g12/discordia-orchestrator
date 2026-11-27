@@ -141,6 +141,7 @@ Cada nodo es una EC2 en la subnet pública de la VPC, con IP privada fija y su p
 |---|---|---|---|
 | `rabbitmq` | `rabbitmq:3-management-alpine` | 5672, 127.0.0.1:15672 (panel) | 320 MB |
 | `payments-service` | `ghcr.io/discordia-g12/payments-service` | 8003 → 8000 | 192 MB |
+| `payments-outbox-worker` | misma imagen que Payments | — | 96 MB |
 | `prometheus` | `prom/prometheus:v2.53.0` | 127.0.0.1:9090 | 256 MB |
 | `grafana` | `grafana/grafana-oss:11.6.0` | 127.0.0.1:3030 | 128 MB |
 
@@ -345,6 +346,7 @@ que el cambio. Un worker aparte lo publica en RabbitMQ (al menos una vez; los co
 | Productor | Exchange (topic) | Eventos |
 |---|---|---|
 | Auth-User | `user.events` | `user.registered`, `user.profile.updated` |
+| Payments | `payments.events` | `payment.completed`, `payment.failed`, `payment.refunded`, `points.purchased`, `server.boosted`, `server.boost_removed`, `server.boost_level_changed` (ADR-001 de Payments). Los publica `payments-outbox-worker` |
 | Chat-Engine | `server.events` | `message.deleted_by_moderator`, `chat.message.created` (todo mensaje de DM, con `recipient_ids`, y de canal de servidor; las respuestas de hilo con sus participantes; ADR-07 de Chat, ADR 0017) |
 | Server-Roles | `server.events` | `server.updated` (nombre, descripción, ícono o banner), `server.deleted`, `channel.created/updated/deleted`, `channels.reordered`, `category.created/updated/deleted`, `categories.reordered`, `role.permissions_updated`, `role.deleted`, `member.role_assigned/removed`, `member.left`, `member.kicked`, `member.banned/unbanned`, `member.muted/unmuted` |
 
@@ -720,7 +722,7 @@ flowchart LR
 | Chat-Engine-Service | `chat-engine-service` | realtime | `chat-engine-service` |
 | Voice-Signaling-Session-Service | `voice-signaling-service` | realtime | `voice-signaling-service` |
 | Notification-Audit-Metrics-Service | `notification-service` | realtime | `notification-service` |
-| Payments-Monetization-Service | `payments-service` | infra | `payments-service` |
+| Payments-Monetization-Service | `payments-service` | infra | `payments-service`, `payments-outbox-worker` |
 
 ### Deploy de un servicio
 
